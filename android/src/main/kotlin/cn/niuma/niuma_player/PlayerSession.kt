@@ -3,6 +3,7 @@ package cn.niuma.niuma_player
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Surface
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
@@ -86,6 +87,10 @@ internal abstract class PlayerSession(
     protected var hadFirstFrame: Boolean = false
 
     // ── Snapshot fields. Touched only on the main looper. ────────────────
+    // 这条不变量由 [dispatchedToMain] 在每个 notify* 入口守住：IJK 的 Java 层
+    // 回调经其 EventHandler 投递到创建 session 的线程（即主线程），所以正常
+    // 情况下守卫不会触发；一旦内核换成直接在工作线程回调的实现，这里会把
+    // 调用转投主线程并打 warning，而不是让 phase / position 产生竞态。
     private var phase: String = PHASE_IDLE
     private var positionMs: Long = 0L
 
@@ -227,6 +232,7 @@ internal abstract class PlayerSession(
     // single emitState() call. Subclasses don't touch [phase] directly.
 
     protected fun notifyPrepared(durationMs: Long, width: Int, height: Int) {
+        if (dispatchedToMain { notifyPrepared(durationMs, width, height) }) return
         if (released) return
         this.durationMs = durationMs
         this.width = width
@@ -266,6 +272,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyOpeningStage(stage: String) {
+        if (dispatchedToMain { notifyOpeningStage(stage) }) return
         if (released) return
         if (phase == PHASE_OPENING) {
             openingStage = stage
@@ -274,6 +281,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyBufferingStart() {
+        if (dispatchedToMain { notifyBufferingStart() }) return
         if (released) return
         // Only meaningful while playing — a pause during buffer shouldn't
         // read as buffering forever.
@@ -284,6 +292,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyBufferingEnd() {
+        if (dispatchedToMain { notifyBufferingEnd() }) return
         if (released) return
         if (phase == PHASE_BUFFERING) {
             phase = if (userWantsPlay) PHASE_PLAYING else PHASE_PAUSED
@@ -292,6 +301,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyVideoRenderingStart() {
+        if (dispatchedToMain { notifyVideoRenderingStart() }) return
         if (released) return
         hadFirstFrame = true
         // Authoritative confirmation that frames are flowing. If user intent
@@ -303,6 +313,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyCompletion() {
+        if (dispatchedToMain { notifyCompletion() }) return
         if (released) return
         if (loopingEnabled) {
             // Defer restart to the next main-loop tick — synchronous seek/start
@@ -332,6 +343,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyVideoSize(width: Int, height: Int) {
+        if (dispatchedToMain { notifyVideoSize(width, height) }) return
         if (released) return
         this.width = width
         this.height = height
@@ -339,6 +351,7 @@ internal abstract class PlayerSession(
     }
 
     protected fun notifyBufferedPercent(percent: Int) {
+        if (dispatchedToMain { notifyBufferedPercent(percent) }) return
         if (released) return
         if (durationMs > 0) {
             val p = percent.coerceIn(0, 100)
@@ -357,6 +370,10 @@ internal abstract class PlayerSession(
         positionMs: Long? = null,
         durationMs: Long? = null
     ) {
+        if (dispatchedToMain {
+                notifyError(category, code, message, positionMs, durationMs)
+            }
+        ) return
         if (released) return
         if (positionMs != null && positionMs >= 0) this.positionMs = positionMs
         if (durationMs != null && durationMs >= 0) this.durationMs = durationMs
@@ -365,6 +382,21 @@ internal abstract class PlayerSession(
         errorMessage = message
         phase = PHASE_ERROR
         emitState()
+    }
+
+    /**
+     * 状态字段只允许主线程改。不在主线程 → 打 warning、把 [retry] 投递到主
+     * 线程重新执行，并返回 true 让调用方立即 return；在主线程 → 返回 false。
+     */
+    private fun dispatchedToMain(retry: () -> Unit): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) return false
+        Log.w(
+            TAG,
+            "PlayerSession state touched off the main thread " +
+                "(${Thread.currentThread().name}); re-dispatching to main"
+        )
+        mainHandler.post(retry)
+        return true
     }
 
     // ── Public command API ───────────────────────────────────────────────
@@ -536,6 +568,7 @@ internal abstract class PlayerSession(
     }
 
     companion object {
+        private const val TAG = "NiumaPlayerSession"
         private const val HEARTBEAT_INTERVAL_MS: Long = 250
 
         // Phase string constants. Mirror PlayerPhase enum on the Dart side.
