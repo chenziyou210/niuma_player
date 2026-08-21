@@ -4,14 +4,17 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'niuma_player'
-  s.version          = '0.0.1'
-  s.summary          = 'A new Flutter plugin project.'
+  # 与 pubspec.yaml 的 version 保持一致——CI 会校验两者相同。
+  s.version          = '0.5.2'
+  s.summary          = 'Headless Flutter video player SDK: unified controller across iOS / Android / Web.'
   s.description      = <<-DESC
-A new Flutter plugin project.
+niuma_player iOS pod: video_player (AVPlayer) primary path plus the Picture-in-Picture bridge
+(NiumaPipPlugin) and system helpers. Orchestration (multi-line failover, retry, middleware)
+lives in Dart; this pod only carries the native glue.
                        DESC
-  s.homepage         = 'http://example.com'
+  s.homepage         = 'https://github.com/axin789/niuma_player'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Your Company' => 'email@example.com' }
+  s.author           = { 'doubledog789' => '248255786+doubledog789@users.noreply.github.com' }
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
@@ -21,9 +24,8 @@ A new Flutter plugin project.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
   s.swift_version = '5.0'
 
-  # If your plugin requires a privacy manifest, for example if it uses any
-  # required reason APIs, update the PrivacyInfo.xcprivacy file to describe your
-  # plugin's privacy impact, and then uncomment this line. For more information,
-  # see https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
-  # s.resource_bundles = {'niuma_player_privacy' => ['Resources/PrivacyInfo.xcprivacy']}
+  # Privacy manifest 随 pod 打包（目前声明为空：不追踪、不采集、未用 required-reason
+  # API）。之后若用到 UserDefaults / 文件时间戳等 required-reason API，改
+  # Resources/PrivacyInfo.xcprivacy 的 NSPrivacyAccessedAPITypes。
+  s.resource_bundles = {'niuma_player_privacy' => ['Resources/PrivacyInfo.xcprivacy']}
 end

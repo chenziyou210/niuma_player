@@ -9,6 +9,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **工程治理**：
+  - CI 的 analyze + test 改为矩阵：`3.27.0`（pubspec 声明的下限，此前从未被验证）
+    与浮动 stable 各跑一遍；新增 podspec 版本与 pubspec 一致性校验；
+    build-android 新增 vendored IJK aar 的 SHA-256 校验（事实源
+    `VERSIONS.lock` 新增 `AAR_SHA256`）。
+  - `ios/niuma_player.podspec` 从模板值（0.0.1 / example.com / Your Company）
+    改为真实元数据，并通过 `resource_bundles` 把 `PrivacyInfo.xcprivacy`
+    打进 pod（此前该行被注释，清单从未随包发布）。
 - **IJK 产物说明统一到现状**：`CLAUDE.md` / `README.md` / `pubspec.yaml` /
   `android/build.gradle` 注释 / `CONTRIBUTING.md` / `android/scripts/compile/`
   （README、`VERSIONS.lock` 的 `AAR_VERSION`、ff8 模块脚本头注释、POM 描述、

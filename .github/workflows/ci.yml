@@ -8,15 +8,32 @@ on:
 
 jobs:
   analyze-and-test:
-    name: Analyze + Test
+    name: Analyze + Test (${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pubspec 声明的最低版本：保证 >=3.27.0 这个下限是真的
+          - label: floor 3.27.0
+            flutter-version: '3.27.0'
+          # 浮动 stable：提前发现新版本的破坏性变更
+          - label: latest stable
+            flutter-version: ''
     steps:
       - uses: actions/checkout@v4
 
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ matrix.flutter-version }}
           cache: true
+
+      - name: podspec 版本与 pubspec 一致
+        run: |
+          PUB=$(sed -n 's/^version: *//p' pubspec.yaml)
+          grep -q "s.version *= *'$PUB'" ios/niuma_player.podspec \
+            || { echo "ios/niuma_player.podspec 的 s.version 与 pubspec.yaml 的 $PUB 不一致"; exit 1; }
 
       - name: flutter pub get
         run: flutter pub get
@@ -53,6 +70,14 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - name: 校验 vendored IJK aar 的 SHA-256（事实源 VERSIONS.lock）
+        run: |
+          LOCK=android/scripts/compile/VERSIONS.lock
+          VER=$(sed -n 's/^AAR_VERSION=//p' $LOCK)
+          SHA=$(sed -n 's/^AAR_SHA256=//p' $LOCK)
+          AAR=android/localmaven/tv/danmaku/ijk/ijkplayer/$VER/ijkplayer-$VER.aar
+          echo "$SHA  $AAR" | sha256sum -c -
 
       - name: flutter pub get
         working-directory: example

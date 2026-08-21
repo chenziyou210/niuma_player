@@ -38,6 +38,8 @@ OPENSSL_LINK=static
 # 2026-07-27 同日二次产物：STL 改 c++_static，不再随包带 libc++_shared.so
 ANDROID_STL=c++_static
 AAR_VERSION=0.8.8-ff8.1-static-20260727
+# vendored aar 的校验和，CI（build-android）会核对；重编后用 shasum -a 256 更新
+AAR_SHA256=02ae43d9645130cd297961b8ce041f096cabcfd33bc2978a2618517f5e34dc7c
 
 # ---------------- LEGACY ----------------
 # niuma_player IJK / FFmpeg 版本锁定
