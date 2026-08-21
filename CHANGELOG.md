@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **IJK 产物说明统一到现状**：`CLAUDE.md` / `README.md` / `pubspec.yaml` /
+  `android/build.gradle` 注释 / `CONTRIBUTING.md` / `android/scripts/compile/`
+  （README、`VERSIONS.lock` 的 `AAR_VERSION`、ff8 模块脚本头注释、POM 描述、
+  `build.sh` / `Dockerfile` 废弃标记）此前仍写着 GSY 官方 FFmpeg 4.3 或自编
+  7.1.1，现统一为自编 FFmpeg 8.1 `0.8.8-ff8.1-static-20260727`——目前唯一能
+  正确播 H.265 fMP4 分片 HLS 的产物，并明确不要换回 GSY / FFmpeg 4.x。
+
 ### Fixed
 
 - **Controller 并发操作竞态：`load()` / `switchLine()` 现在是"最后一次说了算"。**

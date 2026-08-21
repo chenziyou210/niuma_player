@@ -8,6 +8,7 @@
 #   - 0002 补丁：FFmpeg 8 API 移植 + niuma 三处修复
 #   - 0003 补丁：ijk 的 FFmpeg 侧补丁 rebase 到 n8.1
 
+# 注意：ShikinChen 的 tag 名里的 ff7.1 只是该 JNI fork 的基线，FFmpeg 实际用下方上游 n8.1
 IJK_FORK=ShikinChen/ijkplayer-android
 IJK_TAG=ijk0.8.8--ff7.1
 IJK_COMMIT=1b61cbe52473f7abb3f4f2cd19e2359d22f8dde8
@@ -34,7 +35,9 @@ FFMPEG_MODULE=modules/module-niuma-ff8-slim.sh
 LICENSE=LGPL-2.1
 FFMPEG_GPL=disabled
 OPENSSL_LINK=static
-AAR_VERSION=0.8.8-ff8.1-20260727
+# 2026-07-27 同日二次产物：STL 改 c++_static，不再随包带 libc++_shared.so
+ANDROID_STL=c++_static
+AAR_VERSION=0.8.8-ff8.1-static-20260727
 
 # ---------------- LEGACY ----------------
 # niuma_player IJK / FFmpeg 版本锁定

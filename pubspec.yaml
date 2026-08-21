@@ -25,7 +25,7 @@ dependencies:
   # 三端主路径都是 video_player：iOS → AVPlayer，Android → ExoPlayer（官方
   # 维护，随 vp 升级），Web 例外——用自家 WebVideoBackend（vp web 缺 Chrome
   # HLS / httpHeaders，且有手势拦截、全屏搬迁黑屏等问题）。Android 另带
-  # GSY IJK 作软解兜底。
+  # 自编 IJK（FFmpeg 8.1，android/localmaven）作软解兜底。
   #
   # Web HLS note: mp4 plays natively via <video> in all browsers, Safari plays
   # m3u8 natively. Chrome/Firefox/Edge need hls.js (MSE) for HLS — we vendor

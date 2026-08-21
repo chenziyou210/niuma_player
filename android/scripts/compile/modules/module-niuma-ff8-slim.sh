@@ -1,9 +1,12 @@
 #! /usr/bin/env bash
 #
-# niuma_player module-niuma-ff7-slim.sh
+# niuma_player module-niuma-ff8-slim.sh
 #
-# FFmpeg 7.1.1 (ShikinChen/FFmpeg @ ff7.1--ijk0.8.8) slim config for the
-# ShikinChen/ijkplayer-android (@ ijk0.8.8--ff7.1) autotools build flow.
+# FFmpeg 8.1 (upstream FFmpeg/FFmpeg @ n8.1 + patches/0003) slim config for the
+# ShikinChen/ijkplayer-android (@ ijk0.8.8--ff7.1, JNI layer only) autotools
+# build flow. Diff vs module-niuma-ff7-slim.sh: drop --disable-postproc
+# (option removed in ff8), add --enable-protocol=udp (tls_openssl.c in ff8
+# references ff_udp_* for DTLS).
 # Sourced as config/module.sh by android/contrib/tools/do-compile-ffmpeg.sh.
 #
 # Goal: smallest possible libijkplayer.so that still plays VOD mp4 / HLS.
@@ -14,7 +17,7 @@
 #   - bsf:      aac_adtstoasc h264_mp4toannexb
 #   - protocols: file http https httpproxy tcp tls crypto data cache hls + ijk*
 #   - no GPL, OpenSSL TLS backend (force-flagged nonfree by the fork's
-#     do-compile when extra/openssl is built — matches fijk's ff7.1.1 binary)
+#     do-compile when extra/openssl is built)
 #
 # ff7 corrections vs the old ff4.0 module-lite-hevc.sh:
 #   - drop --disable-ffserver        (component removed in ff7)

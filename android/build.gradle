@@ -55,15 +55,13 @@ android {
     }
 
     dependencies {
-        // IJK 软解兜底改用 GSY 官方 MavenCentral 产物（bilibili ijkplayer
-        // 0.8.8 血统 + FFmpeg 4.3 全量：h264/h265/mp4/hls 全支持，多年线上
-        // 验证）。替换原自编 ShikinChen ff7.1 slim aar——后者在真机上连续
-        // 踩中 fork 私货（show_first_frame seek(0) hack）与 2.5K 软解不出
-        // 帧的问题，排障成本远超收益。体积：arm64 三件套约 7.5MB（比自编
-        // slim 大 ~0.6MB，市面稳定产物中最小）。
-        // - gsyvideoplayer-java：官方 ijkplayer-java（保留 tv.danmaku.ijk
-        //   包名，API 与 IjkSession 完全兼容），依赖仅 androidx 基础件
-        // - ex_so：含 hevc 的扩展版 so（标准版无 hevc）
+        // IJK 软解兜底：自编 FFmpeg 8.1 产物，vendored 在 ../localmaven/
+        // （ShikinChen/ijkplayer-android JNI + 上游 FFmpeg n8.1 + 本仓 3 个
+        // 补丁，OpenSSL 3.2 静态，c++_static 不带 libc++_shared，
+        // arm64-v8a + armeabi-v7a）。这是目前唯一能正确播 H.265 fMP4 分片
+        // HLS 的产物——GSY 官方 / FFmpeg 4.x 产物 fMP4 位置恒 0、seek 永久卡
+        // buffering，别换回去。版本事实源 scripts/compile/VERSIONS.lock，
+        // 根因与实测 doc/ijk-fmp4-hls.md。
         implementation("tv.danmaku.ijk:ijkplayer:0.8.8-ff8.1-static-20260727@aar")
     }
 }

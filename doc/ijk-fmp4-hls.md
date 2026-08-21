@@ -121,11 +121,11 @@ ijk 相对上游只有 **455 行 / 7 个文件**（`ijkutils.c`、`application.c
 
 ## 待办
 
-- [ ] 编 `armeabi-v7a`（目前只有 arm64-v8a）
-- [ ] `VERSIONS.lock` 更新到 ff8.1 + 新 commit SHA
-- [ ] 编译链脚本（`android/scripts/compile/`）随 aar 一起回归本仓
+- [x] 编 `armeabi-v7a`（`0.8.8-ff8.1-static-20260727` 双 ABI）
+- [x] `VERSIONS.lock` 更新到 ff8.1 + 新 commit SHA
+- [x] 编译链脚本（`android/scripts/compile/`）随 aar 一起回归本仓
 - [ ] 更多真机机型 / 弱网场景验证
-- [ ] 评估是否值得自维护 vs 回 GSY 官方产物（后者 fMP4 seek 仍坏）
+- [x] 结论：继续自维护。GSY 官方产物 fMP4 seek 仍坏，自编 ff8.1 是唯一能播 H.265 fMP4 的产物，不回退
 
 ## 方法论教训
 

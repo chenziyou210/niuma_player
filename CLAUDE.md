@@ -54,7 +54,7 @@ NiumaPlayerController (lib/src/player/niuma_player_controller.dart)
 
 Android 默认走官方 `video_player`（ExoPlayer 硬解，**官方维护、随 vp 升级，SDK 不再自维护 Exo**——自研 `ExoPlayerSession.kt` 与 media3 直接依赖已删除，git 历史可寻，别恢复）；`forceIjkOnAndroid: true` 强制 IJK 软解。initialize 失败时 Dart 侧**当次会话内**自动用 IJK 重试一次（不落盘）；双内核都失败抛 `EngineFallbackFailure`（携带两段原始错误）。**设备记忆策略（Try-Fail-Remember）已移除**——一次失败不再影响后续会话。`useAndroidPlatformView: true` 在 vp 主路径映射为 `VideoViewType.platformView`，在 IJK 路径走自家 Hybrid Composition。vp 依赖新版由 Dependabot 提 PR + CI 验证（`.github/dependabot.yml`）。
 
-IJK 原生产物来自 **GSY 官方 MavenCentral**（`io.github.carguo:gsyvideoplayer-java/-ex_so:11.3.0`，bilibili ijkplayer 0.8.8 + FFmpeg 4.3 全量：h264/h265/mp4/HLS，minSdk 21）。不要升到 12.x+（要求 minSdk 23）。历史上的自编 ShikinChen ff7.1 aar 及编译链已退役（git 历史可寻），别恢复——它有 fork 私货（show_first_frame 的 seek(0) hack）且高码率流软解不出帧。
+IJK 原生产物是自编 **FFmpeg 8.1** IJK：`tv.danmaku.ijk:ijkplayer:0.8.8-ff8.1-static-20260727`（ShikinChen/ijkplayer-android JNI + 上游 FFmpeg n8.1 + 本仓 3 个补丁，OpenSSL 3.2 静态，`c++_static`，arm64-v8a + armeabi-v7a），vendored 在 `android/localmaven/`，随 pub 包发布。**这是目前唯一能正确播放 H.265 fMP4 分片 HLS 的产物**——GSY 官方 / bilibili FFmpeg 4.x 产物 fMP4 位置恒 0、seek 永久卡 buffering；fork 原有的私货（`show_first_frame` 的 seek(0) hack、无视 `mediacodec=0` 选项）已在补丁 0002 里修掉。**不要换回 GSY 或任何 FFmpeg 4.x / 7.x 产物。** 版本唯一事实源是 `android/scripts/compile/VERSIONS.lock`，根因与实测见 `doc/ijk-fmp4-hls.md`；重编流程见 `android/scripts/compile/README.md`（`build.sh` / `Dockerfile` 是废弃的 debugly ff4.0 旧流程，仅留档）。
 
 ### 3. 编排层独立于 backend
 

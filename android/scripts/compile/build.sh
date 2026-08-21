@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ⚠️ 废弃（仅留档）：这是旧 debugly/ijkplayer + bilibili FFmpeg 4.0 流程，
+# 产物播不了 fMP4 分片 HLS。现网 ff8.1 产物（0.8.8-ff8.1-static-20260727）
+# 走 README.md 的手工流程 + VERSIONS.lock，别用本脚本重编。
+#
 # Build ijkplayer.aar from source. Only needed to regenerate / bump the
 # vendored aar — the current build is already committed under android/localmaven/.
 #

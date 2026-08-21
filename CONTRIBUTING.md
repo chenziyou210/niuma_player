@@ -36,7 +36,7 @@ lib/                       公开 Dart API（barrel：lib/niuma_player.dart）
 ├── src/orchestration/     纯 Dart 编排（multi_source / auto_failover / retry / middleware）
 ├── src/cast/              投屏值类型（CastDevice / CastSession / CastState）
 └── src/player/            controller + NiumaPlayerView + 手势/全屏 headless controller
-android/src/main/kotlin/   Android 原生插件（ExoPlayer ↔ IJK，IJK 已升 FFmpeg 7.1.1）
+android/src/main/kotlin/   Android 原生插件（IJK 软解兜底，自编 FFmpeg 8.1；ExoPlayer 走官方 video_player）
 ios/                       iOS pod（基于 video_player AVPlayer）+ PiP 反射桥
 test/                      纯 Dart 单元测试
 example/                   100 行最小 demo（消费内核）

@@ -45,7 +45,7 @@ niuma_player 只做一件事：**把视频在三端可靠地播起来，并把�
 | 平台 | 后端引擎 | HLS | PiP |
 |---|---|:-:|:-:|
 | **iOS** | AVPlayer (`video_player`) | ✅ 原生 | ✅（反射 AVPlayer 接 `AVPictureInPictureController`） |
-| **Android** | ExoPlayer（`video_player` 官方维护，硬解，默认）↔ IJK（软解兜底，GSY 官方产物：bilibili ijkplayer 0.8.8 + FFmpeg 4.3 全量，h264/h265） | ✅ 原生 | ✅（业务侧 1 行回调接入） |
+| **Android** | ExoPlayer（`video_player` 官方维护，硬解，默认）↔ IJK（软解兜底，自编 FFmpeg 8.1 产物，h264/h265，含 fMP4 分片 HLS） | ✅ 原生 | ✅（业务侧 1 行回调接入） |
 | **Web** | `<video>` + 按需 hls.js | ✅（Safari 原生 / Chrome·Firefox·Edge 走 hls.js 懒注入） | ⚠️ 浏览器无可靠程序化 API |
 
 Web 端基于 `package:web`，**wasm-ready**（可随 `flutter build web --wasm` 编译）。
@@ -63,7 +63,7 @@ dependencies:
 flutter pub get
 ```
 
-Dart 侧外部依赖只有 5 个：`video_player`（iOS AVPlayer / Android ExoPlayer 主路径）、`web`（Web 后端）、`plugin_platform_interface`、`meta`、`clock`；另有 Flutter SDK 自带的 `flutter_web_plugins`。Android 原生只引入 GSY ijkplayer（MavenCentral，minSdk 21）作软解兜底——ExoPlayer 来自官方 `video_player`，随它升级，SDK 不再自维护。
+Dart 侧外部依赖只有 5 个：`video_player`（iOS AVPlayer / Android ExoPlayer 主路径）、`web`（Web 后端）、`plugin_platform_interface`、`meta`、`clock`；另有 Flutter SDK 自带的 `flutter_web_plugins`。Android 原生只引入自编 IJK aar（FFmpeg 8.1，vendored 在 `android/localmaven/`，minSdk 21）作软解兜底——ExoPlayer 来自官方 `video_player`，随它升级，SDK 不再自维护。
 
 ---
 

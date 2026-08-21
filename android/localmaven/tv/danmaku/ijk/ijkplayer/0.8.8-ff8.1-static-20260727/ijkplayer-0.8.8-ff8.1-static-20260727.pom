@@ -7,5 +7,5 @@
     <artifactId>ijkplayer</artifactId>
     <version>0.8.8-ff8.1-static-20260727</version>
     <packaging>aar</packaging>
-    <description>ShikinChen/ijkplayer-android (ijk0.8.8--ff7.1) + FFmpeg 7.1.1 精简 VOD mp4/HLS 构建，arm64-v8a + armeabi-v7a。相对 0.8.8-ff7.1.1-20260601 的唯一改动：cmake/ijkmedia/ijkj4a/CMakeLists.txt 把 ijkj4a 由 SHARED 改回 STATIC（静态链进 libijkplayer.so），修复独立 libijkj4a.so 导致 mNativeMediaPlayer jfieldID 为 NULL 的 IJK 启动崩溃（对齐 fijkplayer / 官方 bilibili 的 j4a 静态链结构）。FFmpeg/OpenSSL .a 复用既有缓存，仅重链 JNI 层；链接保留 -Wl,-Bsymbolic 避免 FFmpeg aarch64 tx_float 文本重定位。Vendored for niuma_player. 见 android/scripts/compile/VERSIONS.lock。</description>
+    <description>ShikinChen/ijkplayer-android (ijk0.8.8--ff7.1, JNI 层) + 上游 FFmpeg n8.1 + niuma 补丁 0001~0003 的精简 VOD mp4/HLS 构建，arm64-v8a + armeabi-v7a，OpenSSL 3.2 静态链接，STL c++_static（不带 libc++_shared.so），jni/&lt;abi&gt; 各含 libijkplayer/sdl/soundtouch/yuv/j4a 五个 .so。相对 0.8.8-ff8.1-20260727 的唯一改动：STL 由 c++_shared 改为 c++_static。修复 fMP4 分片 HLS 位置恒 0 / seek 永久 buffering、fork 的 show_first_frame seek(0) 私货与无视 mediacodec=0 的问题。Vendored for niuma_player. 版本事实源见 android/scripts/compile/VERSIONS.lock，根因见 doc/ijk-fmp4-hls.md。</description>
 </project>
