@@ -12,7 +12,7 @@ niuma_player iOS pod: video_player (AVPlayer) primary path plus the Picture-in-P
 (NiumaPipPlugin) and system helpers. Orchestration (multi-line failover, retry, middleware)
 lives in Dart; this pod only carries the native glue.
                        DESC
-  s.homepage         = 'https://github.com/axin789/niuma_player'
+  s.homepage         = 'https://github.com/doubledog789/niuma_player'
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'doubledog789' => '248255786+doubledog789@users.noreply.github.com' }
   s.source           = { :path => '.' }

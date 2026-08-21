@@ -48,6 +48,7 @@ export 'src/capabilities/niuma_capabilities.dart' show NiumaCapabilities;
 
 // 编排
 export 'src/orchestration/multi_source.dart'
+    // ignore: deprecated_member_use_from_same_package  // 弃用期内仍需导出
     show MediaQuality, MediaLine, NiumaMediaSource, MultiSourcePolicy;
 export 'src/orchestration/source_middleware.dart'
     show
@@ -57,6 +58,7 @@ export 'src/orchestration/source_middleware.dart'
         runSourceMiddlewares;
 export 'package:niuma_player/src/orchestration/retry_policy.dart'
     show RetryPolicy;
+// ignore: deprecated_member_use_from_same_package  // 弃用期内仍需导出
 export 'src/orchestration/auto_failover.dart' show AutoFailoverOrchestrator;
 export 'src/orchestration/player_pool.dart'
     show NiumaPlayerPool, PoolControllerFactory;

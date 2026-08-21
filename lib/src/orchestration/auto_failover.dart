@@ -1,8 +1,21 @@
+// 本文件整体已弃用，内部互相引用的 deprecated 提示无意义。
+// ignore_for_file: deprecated_member_use_from_same_package
+
 import 'package:niuma_player/src/domain/player_state.dart';
 import 'package:niuma_player/src/orchestration/multi_source.dart';
 
 /// 初始化失败后决定下一条尝试的 [MediaLine]，按 [MediaLine.priority]
 /// 升序遍历；无法 failover 或预算耗尽时 [nextLine] 返 `null`。
+///
+/// **已弃用**：`NiumaPlayerController` 从未接入它，其"仅 network / terminal
+/// 错误才 failover、有 maxAttempts 预算"的语义与 controller 实际行为
+/// （任何错误都按 priority 遍历）并不一致。首播 failover 请用
+/// `NiumaPlayerOptions.autoFailoverOnInitialError`。下个 minor 版本移除。
+@Deprecated(
+  'Never wired into NiumaPlayerController; use '
+  'NiumaPlayerOptions.autoFailoverOnInitialError. Will be removed in the '
+  'next minor release.',
+)
 class AutoFailoverOrchestrator {
   /// 为 [lines] 创建一个由 [policy] 控制的编排器。
   AutoFailoverOrchestrator({required this.lines, required this.policy});

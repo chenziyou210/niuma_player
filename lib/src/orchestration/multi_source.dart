@@ -172,6 +172,16 @@ class NiumaMediaSource {
 
 /// 控制 source 初始化失败时是否自动尝试下一条优先级线路；
 /// 希望错误直接抛到 UI 时用 [MultiSourcePolicy.manual]。
+///
+/// **已弃用**：`NiumaPlayerController` 从未消费过它——首播 failover 由
+/// `NiumaPlayerOptions.autoFailoverOnInitialError` 驱动（默认线路失败后把
+/// 其余线路按 priority 升序逐条再试，不区分错误类别、无预算上限）。保留
+/// 这个类只会让人以为有两套 failover 语义。下个 minor 版本移除。
+@Deprecated(
+  'Never consumed by NiumaPlayerController; configure failover with '
+  'NiumaPlayerOptions.autoFailoverOnInitialError instead. Will be removed '
+  'in the next minor release.',
+)
 @immutable
 class MultiSourcePolicy {
   const MultiSourcePolicy._({
@@ -194,10 +204,12 @@ class MultiSourcePolicy {
   final int maxAttempts;
 }
 
+// ignore: deprecated_member_use_from_same_package
 class _AutoFailover extends MultiSourcePolicy {
   const _AutoFailover({super.maxAttempts = 1}) : super._(enabled: true);
 }
 
+// ignore: deprecated_member_use_from_same_package
 class _Manual extends MultiSourcePolicy {
   const _Manual() : super._(enabled: false, maxAttempts: 0);
 }

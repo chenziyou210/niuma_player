@@ -9,6 +9,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- 仓库地址统一为 `github.com/doubledog789/niuma_player`（pubspec 的
+  homepage / repository / issue_tracker / documentation、podspec、文档）。
+- **Android `PlayerSession`**：每个 `notify*` 入口加主线程守卫——不在主线程
+  即打 warning 并转投主线程。当前 IJK 回调经其 `EventHandler` 本就落在主线程，
+  守卫是防线而非修复：内核换成工作线程回调的实现时不会静默产生
+  phase / position 竞态。
 - **工程治理**：
   - CI 的 analyze + test 改为矩阵：`3.27.0`（pubspec 声明的下限，此前从未被验证）
     与浮动 stable 各跑一遍；新增 podspec 版本与 pubspec 一致性校验；
@@ -23,6 +29,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `build.sh` / `Dockerfile` 废弃标记）此前仍写着 GSY 官方 FFmpeg 4.3 或自编
   7.1.1，现统一为自编 FFmpeg 8.1 `0.8.8-ff8.1-static-20260727`——目前唯一能
   正确播 H.265 fMP4 分片 HLS 的产物，并明确不要换回 GSY / FFmpeg 4.x。
+
+### Deprecated
+
+- `MultiSourcePolicy` 与 `AutoFailoverOrchestrator`：两者从未被
+  `NiumaPlayerController` 消费，且 orchestrator 的语义（仅 network / terminal
+  错误才 failover、有预算）与 controller 实际行为不一致。首播 failover 请用
+  `NiumaPlayerOptions.autoFailoverOnInitialError`。仍导出但标 `@Deprecated`，
+  下个 minor 版本移除。
 
 ### Added
 

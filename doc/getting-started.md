@@ -15,7 +15,7 @@
 dependencies:
   niuma_player:
     git:
-      url: https://github.com/axin789/niuma_player.git
+      url: https://github.com/doubledog789/niuma_player.git
       ref: main
 ```
 

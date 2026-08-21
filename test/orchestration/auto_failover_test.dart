@@ -1,3 +1,6 @@
+// 被测 API 已弃用但仍导出，行为测试保留到移除为止。
+// ignore_for_file: deprecated_member_use_from_same_package, deprecated_member_use
+
 // test/orchestration/auto_failover_test.dart
 import 'package:flutter_test/flutter_test.dart';
 import 'package:niuma_player/src/domain/data_source.dart';
