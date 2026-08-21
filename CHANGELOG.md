@@ -48,6 +48,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`switchLine` 失败时候选线路的 `phase=error` 不再泄漏进 `value`；切换前
+  快照取自稳定状态。** 模拟器验收抓到：用户切到不可用线路，候选 backend 初始化
+  阶段推出的 error 进了 `value`，上层"播放中途自动容灾"据此抢先又发起一次
+  `switchLine` 压倒了用户那次，且其位置 / 播放快照取自半成品（0:00、未播放），
+  回滚后播放器停在 0:00 暂停。现在：切换进行中候选的 error 不写 `value`
+  （"切换失败 = 什么都没发生"，失败由 `LineSwitchFailed` 通知）；禁用回滚或回滚
+  也失败时才显式把 `value` 落到 error（此前这条路径 `value` 会一直停在
+  `playing`）；`switchLine` 的位置 / 播放快照改取最近一次稳定状态，并发切换时
+  不受候选半成品影响。新增 `test/switch_line_snapshot_test.dart`。
 - **手势亮度 / 音量基准值读回期间松手会抛 `Null check operator`**：
   `onPanEnd()` 清掉 `_lockedKind` 后，异步读回的 `onPanUpdate` 续体仍
   `_lockedKind!`。现在按手势序号校验，已结束 / 已换手势的读数直接丢弃——

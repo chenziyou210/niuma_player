@@ -58,6 +58,15 @@ class FakePlayerBackend extends PlayerBackend {
   /// Last argument passed to [seekTo]; null if seekTo was never called.
   Duration? lastSeekTarget;
 
+  /// Number of [play] calls.
+  int playCalls = 0;
+
+  /// Push an arbitrary value through [valueStream] (and make it [value]).
+  void emitValue(NiumaPlayerValue v) {
+    _value = v;
+    if (!_valueController.isClosed) _valueController.add(v);
+  }
+
   /// Simulated playback position returned by [value].
   Duration _simulatedPosition = Duration.zero;
 
@@ -107,7 +116,9 @@ class FakePlayerBackend extends PlayerBackend {
   }
 
   @override
-  Future<void> play() async {}
+  Future<void> play() async {
+    playCalls++;
+  }
 
   @override
   Future<void> pause() async {}

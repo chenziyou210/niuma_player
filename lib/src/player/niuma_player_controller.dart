@@ -123,6 +123,18 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   String? _activeLineId;
 
+  /// 进行中的 [switchLine] 数量（并发切换时可能 >1）。切换期间：候选 backend
+  /// 的 `phase=error` 不写进 [value]（切换失败 = 什么都没发生，由
+  /// [LineSwitchFailed] 通知；回滚不可用时再显式落 error），[value] 的变化
+  /// 也不更新稳定快照。
+  int _switchesInFlight = 0;
+
+  /// 最近一次**稳定**的播放位置 / 是否在播——只在没有切换进行中时随 [value]
+  /// 更新。[switchLine] 的"切换前快照"取自这里，而不是当下的 [value]：并发
+  /// 切换时当下 value 可能已是候选 backend 的半成品（0:00、未播放）。
+  Duration _stablePosition = Duration.zero;
+  bool _stablePlaying = false;
+
   /// Android：本会话内 IJK 已成功接管过（vp 起不来）。之后的 [switchLine] /
   /// 回滚直接用 IJK 拉目标线路，不再让 vp 失败一次。同一媒体的各线路编码
   /// 通常一致，这个记忆才成立；[load] 换媒体时清掉，新媒体重新给 vp 机会。
@@ -451,6 +463,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final wasPlaying = value.isPlaying;
     final wasInPip = value.isInPictureInPicture;
     super.value = newValue;
+    if (_switchesInFlight == 0) {
+      _stablePosition = newValue.position;
+      _stablePlaying = newValue.isPlaying;
+    }
     final inPip = newValue.isInPictureInPicture;
     final isPlaying = newValue.isPlaying;
     if (isPlaying != wasPlaying) _syncWakelock(isPlaying);
@@ -481,6 +497,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     _backend = backend;
     _valueSub = backend.valueStream.listen((v) {
       if (_disposed) return;
+      // 切换进行中，候选 backend 的 error 不进 value：切换失败要么回滚成功
+      // （value 自然恢复），要么在 switchLine 的失败路径里显式落 error。
+      // 否则上层会把"候选线路没起来"当成"正在播的线路挂了"去做自动容灾。
+      if (_switchesInFlight > 0 && v.phase == PlayerPhase.error) return;
       // backend 不知道 platform-level PiP 状态，保留 controller 自己维护的
       // PiP state，否则会被 backend 推的默认 false 覆盖。
       value = v.copyWith(isInPictureInPicture: value.isInPictureInPicture);
@@ -602,10 +622,12 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final epoch = ++_epoch;
     _emit(LineSwitching(fromId: fromId, toId: lineId));
 
-    // 切换前快照，回滚复用同一份，保证"切失败 = 什么都没发生"。
-    final savedPos = value.position;
-    final wasPlaying = value.isPlaying;
+    // 切换前快照取自稳定状态（不是当下 value——并发切换时它可能是候选的
+    // 半成品），回滚复用同一份，保证"切失败 = 什么都没发生"。
+    final savedPos = _stablePosition;
+    final wasPlaying = _stablePlaying;
 
+    _switchesInFlight++;
     try {
       await _doSwitchTo(lineId, epoch,
           savedPos: savedPos, wasPlaying: wasPlaying);
@@ -630,8 +652,16 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
           // 回滚也失败——掉到原始错误处理。
         }
       }
+      // 没有可回滚的状态了：候选的 error 在切换期间被吞掉，这里必须显式落
+      // 到 value，否则 UI 还以为原线路在播。
+      value = value.copyWith(
+        phase: PlayerPhase.error,
+        error: PlayerError(category: _categorize(e), message: e.toString()),
+      );
       _emit(LineSwitchFailed(toId: lineId, error: e));
       rethrow;
+    } finally {
+      _switchesInFlight--;
     }
   }
 
