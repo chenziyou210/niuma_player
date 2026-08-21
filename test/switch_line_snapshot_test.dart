@@ -173,6 +173,38 @@ void main() {
     });
   });
 
+  group('switchLine：播放意图快照含 buffering', () {
+    test('切换发起时原线路正在 buffering（用户想播）：切换失败回滚后要续播', () async {
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          initBlock: ds.uri == srcB.uri
+              ? () async => throw StateError('Unable to resolve host')
+              : null,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        threeLines(),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      await ctrl.initialize();
+      factory.videoPlayers.single.emitValue(
+        playingAt(const Duration(seconds: 19))
+            .copyWith(phase: PlayerPhase.buffering),
+      );
+
+      await ctrl.switchLine('b');
+
+      final rebuiltA = factory.videoPlayers.last;
+      expect(rebuiltA.lastSeekTarget, const Duration(seconds: 19));
+      expect(rebuiltA.playCalls, 1,
+          reason: 'buffering 也是"想播"，回滚后不该停在暂停态等用户再点一次');
+      await ctrl.dispose();
+    });
+  });
+
   group('initialize：候选遍历期间候选的 error 不进 value', () {
     test('默认线路候选推出 error 后失败、备线路成功：全程 value 不出现 error，最终 ready',
         () async {

@@ -131,8 +131,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 无法回滚路径）。期间 [value] 的变化也不更新稳定快照。
   int _candidateBringUps = 0;
 
-  /// 最近一次**稳定**的播放位置 / 是否在播——只在没有切换进行中时随 [value]
-  /// 更新。[switchLine] 的"切换前快照"取自这里，而不是当下的 [value]：并发
+  /// 最近一次**稳定**的播放位置 / 播放意图（含 buffering）——只在没有候选
+  /// 拉起进行中时随 [value] 更新。[switchLine] 的"切换前快照"取自这里，而不是当下的 [value]：并发
   /// 切换时当下 value 可能已是候选 backend 的半成品（0:00、未播放）。
   Duration _stablePosition = Duration.zero;
   bool _stablePlaying = false;
@@ -472,7 +472,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     super.value = newValue;
     if (_candidateBringUps == 0) {
       _stablePosition = newValue.position;
-      _stablePlaying = newValue.isPlaying;
+      // 用播放意图而非"正在出帧"：buffering 也是用户想播，切换 / 回滚后
+      // 要续播，不能停在暂停态等用户再点一次。
+      _stablePlaying = newValue.effectivelyPlaying;
     }
     final inPip = newValue.isInPictureInPicture;
     final isPlaying = newValue.isPlaying;

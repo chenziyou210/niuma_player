@@ -59,6 +59,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   不受候选半成品影响。同一规则也覆盖 `initialize()` / `load()` 的候选遍历
   （多线路 failover、IJK 兜底）：此前默认线路候选失败、下一条还在加载的窗口里
   `value` 已是 error，UI 会先闪错误层再"自愈"（网络慢时在模拟器上复现）。
+  切换前的"是否在播"改用 `effectivelyPlaying`（含 buffering）：此前原线路正在
+  缓冲时发起切换，失败回滚后会停在暂停态等用户再点一次。
   新增 `test/switch_line_snapshot_test.dart`。
 - **手势亮度 / 音量基准值读回期间松手会抛 `Null check operator`**：
   `onPanEnd()` 清掉 `_lockedKind` 后，异步读回的 `onPanUpdate` 续体仍
