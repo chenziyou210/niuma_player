@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:clock/clock.dart';
+import 'package:niuma_player/src/domain/data_source.dart';
 import 'package:niuma_player/src/orchestration/multi_source.dart';
 import 'package:niuma_player/src/player/niuma_player_controller.dart';
 
@@ -38,6 +39,7 @@ class NiumaPlayerPool {
     required this.controllerFactory,
     this.capacity = 3,
     this.staleDuration = const Duration(seconds: 30),
+    this.keyBuilder = keyFor,
   }) {
     // 每 staleDuration/2 扫一次：足够及时回收过期 buffer，又不至于太频繁。
     _staleTimer = Timer.periodic(
@@ -56,11 +58,34 @@ class NiumaPlayerPool {
   /// 一个条目多久没被访问（且未被持有）就视作 stale 被清理。
   final Duration staleDuration;
 
+  /// 把 source 映射成池 key 的函数，默认 [keyFor]。自定义后 release /
+  /// evict / holds 传的 key 要用 [keyOf] 算，别再用静态 [keyFor]。
+  final String Function(NiumaMediaSource source) keyBuilder;
+
+  /// 本池对 [source] 使用的 key（经 [keyBuilder]）。
+  String keyOf(NiumaMediaSource source) => keyBuilder(source);
+
   final Map<String, _Entry> _entries = <String, _Entry>{};
 
-  /// 当前被 acquire 持有 / 正在播的 key——stale 清理永远跳过它们，避免清掉
-  /// 正在前台播的 controller。[release] 把 key 移出本集合，它才有资格被清。
-  final Set<String> _active = <String>{};
+  /// key → 持有者计数。[acquire] +1、[release] −1，归零才算 inactive：
+  /// 同一条视频被两个消费者同时持有时，一个 release 不能让另一个手里的
+  /// controller 变成 LRU / stale 的回收对象。
+  final Map<String, int> _holds = <String, int>{};
+
+  bool _isHeld(String key) => _holds.containsKey(key);
+
+  void _hold(String key) => _holds[key] = (_holds[key] ?? 0) + 1;
+
+  /// 持有计数 −1，归零移除；多余的 release 不会让计数变负。
+  void _unhold(String key) {
+    final n = _holds[key];
+    if (n == null) return;
+    if (n <= 1) {
+      _holds.remove(key);
+    } else {
+      _holds[key] = n - 1;
+    }
+  }
 
   Timer? _staleTimer;
   bool _disposed = false;
@@ -72,16 +97,34 @@ class NiumaPlayerPool {
     entry.accessSeq = ++_accessClock;
   }
 
-  /// 取 source 的主 URL 当池 key——默认线路（[NiumaMediaSource.currentLine]）
-  /// 的 [NiumaDataSource.uri]。同一条视频无论多线路，默认线路相同即同 key。
-  static String keyFor(NiumaMediaSource source) =>
-      source.currentLine.source.uri;
+  /// 默认池 key：默认线路（[NiumaMediaSource.currentLine]）的数据源——
+  /// network 且无 headers 时就是裸 [NiumaDataSource.uri]（向后兼容）；
+  /// 非 network 类型追加 `|type=…`，带 headers 追加按 key 排序的
+  /// `|h=k=v;…`，保证同 URL 不同鉴权信息不会错误复用同一个 controller。
+  /// 同一条视频无论备用线路如何，默认线路相同即同 key。
+  static String keyFor(NiumaMediaSource source) {
+    final ds = source.currentLine.source;
+    final buf = StringBuffer(ds.uri);
+    if (ds.type != NiumaSourceType.network) {
+      buf.write('|type=${ds.type.name}');
+    }
+    final headers = ds.headers;
+    if (headers != null && headers.isNotEmpty) {
+      buf.write('|h=');
+      for (final k in headers.keys.toList()..sort()) {
+        buf.write('$k=${headers[k]};');
+      }
+    }
+    return buf.toString();
+  }
 
   /// 取得一个就绪的 controller：命中直接返回，未命中建 + `initialize()`；
-  /// 超容量先 LRU evict 一个。
+  /// 超容量先 LRU evict 一个。每次调用持有计数 +1，用完 [release] 一次。
+  /// 池已 [dispose] 时抛 [StateError]。
   Future<NiumaPlayerController> acquire(NiumaMediaSource source) async {
-    final key = keyFor(source);
-    _active.add(key);
+    _ensureNotDisposed();
+    final key = keyOf(source);
+    _hold(key);
     final existing = _entries[key];
     if (existing != null) {
       _touch(existing);
@@ -104,7 +147,7 @@ class NiumaPlayerPool {
       allowOverflowWhenNoInactiveVictim: true,
     );
     if (entry == null) {
-      _active.remove(key);
+      _unhold(key);
       throw StateError('Unable to allocate player pool entry for $key');
     }
     final init = entry.controller.initialize();
@@ -122,8 +165,10 @@ class NiumaPlayerPool {
 
   /// 预加载：提前建 + `initialize()` 备用，init 完立刻 `pause()` 阻止
   /// 继续缓冲压低 native heap。已在池则跳过，之后 [acquire] 直接命中。
+  /// 池已 [dispose] 时抛 [StateError]。
   Future<void> preload(NiumaMediaSource source) async {
-    final key = keyFor(source);
+    _ensureNotDisposed();
+    final key = keyOf(source);
     if (_entries.containsKey(key)) return;
     final entry = _put(
       key,
@@ -145,10 +190,12 @@ class NiumaPlayerPool {
     }
   }
 
-  /// 标记 [key] 可回收：移出 active 集合（**不立刻 dispose**），留在池里供
-  /// "上滑回去"命中，最终靠容量 LRU + stale 清理回收。
+  /// 归还一次持有：计数 −1，归零才算可回收（**不立刻 dispose**），留在池
+  /// 里供"上滑回去"命中，最终靠容量 LRU + stale 清理回收。池已 dispose 时
+  /// 为空操作。
   void release(String key) {
-    _active.remove(key);
+    if (_disposed) return;
+    _unhold(key);
     final entry = _entries[key];
     if (entry != null) _touch(entry);
   }
@@ -160,6 +207,10 @@ class NiumaPlayerPool {
   /// 池是否仍持有 [key] 的存活 controller——池可能已因 LRU / stale 回收，
   /// 操作缓存引用前先确认，避免误用已 dispose 的实例。
   bool holds(String key) => _entries.containsKey(key);
+
+  void _ensureNotDisposed() {
+    if (_disposed) throw StateError('NiumaPlayerPool has been disposed');
+  }
 
   /// 建新条目；超容量先 LRU evict 最旧 inactive。全 active 时 acquire
   /// 允许短暂超容，preload 直接跳过（防 capacity=1 时挤掉当前页）。
@@ -176,7 +227,7 @@ class NiumaPlayerPool {
         if (allowOverflowWhenNoInactiveVictim) break;
         return null;
       }
-      _active.remove(victim);
+      _holds.remove(victim);
       final evicted = _entries.remove(victim);
       if (evicted != null) unawaited(evicted.controller.dispose());
     }
@@ -191,7 +242,7 @@ class NiumaPlayerPool {
     String? oldest;
     int? oldestSeq;
     for (final e in _entries.entries) {
-      if (_active.contains(e.key)) continue;
+      if (_isHeld(e.key)) continue;
       if (oldestSeq == null || e.value.accessSeq < oldestSeq) {
         oldest = e.key;
         oldestSeq = e.value.accessSeq;
@@ -202,7 +253,7 @@ class NiumaPlayerPool {
 
   Future<void> _remove(String key) async {
     final entry = _entries.remove(key);
-    _active.remove(key);
+    _holds.remove(key);
     await entry?.controller.dispose();
   }
 
@@ -212,7 +263,7 @@ class NiumaPlayerPool {
     final now = clock.now();
     final stale = <String>[];
     for (final e in _entries.entries) {
-      if (_active.contains(e.key)) continue;
+      if (_isHeld(e.key)) continue;
       if (now.difference(e.value.lastAccess) > staleDuration) {
         stale.add(e.key);
       }
@@ -240,7 +291,7 @@ class NiumaPlayerPool {
     final controllers =
         _entries.values.map((e) => e.controller).toList(growable: false);
     _entries.clear();
-    _active.clear();
+    _holds.clear();
     await Future.wait(controllers.map((c) => c.dispose()));
   }
 }

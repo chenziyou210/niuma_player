@@ -424,4 +424,158 @@ void main() {
     expect(bf.created[0].disposed, isTrue);
     expect(bf.created[1].disposed, isTrue);
   });
+
+  group('持有计数（同 key 多个持有者）', () {
+    test('两个持有者各 acquire 一次，一个 release 后另一个仍受 LRU 保护', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf), capacity: 2);
+
+      final a1 = await pool.acquire(_src('https://x/a.mp4'));
+      final a2 = await pool.acquire(_src('https://x/a.mp4'));
+      expect(identical(a1, a2), isTrue);
+      pool.release('https://x/a.mp4'); // 持有者 1 走了，持有者 2 还在用
+
+      await pool.acquire(_src('https://x/b.mp4'));
+      await pool.acquire(_src('https://x/c.mp4')); // 超容，需要找 victim
+
+      expect(bf.created[0].disposed, isFalse,
+          reason: 'a 仍被一个消费者持有，不能被当作 inactive 淘汰');
+      expect(pool.holds('https://x/a.mp4'), isTrue);
+
+      await pool.dispose();
+    });
+
+    test('所有持有者都 release 之后才有资格被淘汰', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf), capacity: 2);
+
+      await pool.acquire(_src('https://x/a.mp4'));
+      await pool.acquire(_src('https://x/a.mp4'));
+      pool.release('https://x/a.mp4');
+      pool.release('https://x/a.mp4');
+
+      await pool.acquire(_src('https://x/b.mp4'));
+      await pool.acquire(_src('https://x/c.mp4'));
+
+      expect(bf.created[0].disposed, isTrue, reason: '无人持有的 a 是 LRU victim');
+      expect(pool.holds('https://x/a.mp4'), isFalse);
+
+      await pool.dispose();
+    });
+
+    test('一个持有者 release 后另一个仍在，stale 清理也不碰它', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(
+        controllerFactory: factoryWith(bf),
+        staleDuration: const Duration(milliseconds: 40),
+      );
+
+      await pool.acquire(_src('https://x/a.mp4'));
+      await pool.acquire(_src('https://x/a.mp4'));
+      pool.release('https://x/a.mp4');
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      expect(bf.created.single.disposed, isFalse);
+
+      await pool.dispose();
+    });
+
+    test('多余的 release 不会让计数变负（下一次 acquire 仍算持有）', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf), capacity: 2);
+
+      await pool.acquire(_src('https://x/a.mp4'));
+      pool.release('https://x/a.mp4');
+      pool.release('https://x/a.mp4'); // 多余的一次
+      await pool.acquire(_src('https://x/a.mp4')); // 重新持有
+
+      await pool.acquire(_src('https://x/b.mp4'));
+      await pool.acquire(_src('https://x/c.mp4'));
+
+      expect(bf.created[0].disposed, isFalse,
+          reason: '重新 acquire 之后 a 是持有中，不该因之前多 release 一次而被淘汰');
+
+      await pool.dispose();
+    });
+  });
+
+  group('缓存 key', () {
+    test('同 URL 不同 headers 视为不同条目，不误复用鉴权信息', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf));
+
+      final c1 = await pool.acquire(NiumaMediaSource.single(NiumaDataSource.network(
+          'https://x/a.mp4',
+          headers: {'Authorization': 'Bearer A'})));
+      final c2 = await pool.acquire(NiumaMediaSource.single(NiumaDataSource.network(
+          'https://x/a.mp4',
+          headers: {'Authorization': 'Bearer B'})));
+
+      expect(identical(c1, c2), isFalse);
+      expect(factoryCalls, 2);
+
+      await pool.dispose();
+    });
+
+    test('headers 内容相同、顺序不同 → 同一条目', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf));
+
+      final c1 = await pool.acquire(NiumaMediaSource.single(NiumaDataSource.network(
+          'https://x/a.mp4',
+          headers: {'A': '1', 'B': '2'})));
+      final c2 = await pool.acquire(NiumaMediaSource.single(NiumaDataSource.network(
+          'https://x/a.mp4',
+          headers: {'B': '2', 'A': '1'})));
+
+      expect(identical(c1, c2), isTrue);
+      expect(factoryCalls, 1);
+
+      await pool.dispose();
+    });
+
+    test('network 且无 headers 时默认 key 就是 URL（向后兼容裸 URL 调用方）', () {
+      expect(NiumaPlayerPool.keyFor(_src('https://x/a.mp4')), 'https://x/a.mp4');
+    });
+
+    test('可注入自定义 keyBuilder，keyOf 与 release/holds 用同一套 key', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(
+        controllerFactory: factoryWith(bf),
+        keyBuilder: (s) => 'video:${Uri.parse(s.currentLine.source.uri).pathSegments.last}',
+      );
+
+      final c1 = await pool.acquire(_src('https://cdn1/a.mp4'));
+      final c2 = await pool.acquire(_src('https://cdn2/a.mp4'));
+      expect(identical(c1, c2), isTrue, reason: '自定义 key 认为是同一条视频');
+      expect(pool.keyOf(_src('https://cdn2/a.mp4')), 'video:a.mp4');
+      expect(pool.holds('video:a.mp4'), isTrue);
+
+      await pool.dispose();
+    });
+  });
+
+  group('dispose 之后', () {
+    test('acquire / preload 抛 StateError 且不再建 controller', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf));
+      await pool.dispose();
+
+      await expectLater(pool.acquire(_src('https://x/a.mp4')), throwsStateError);
+      await expectLater(pool.preload(_src('https://x/b.mp4')), throwsStateError);
+      expect(factoryCalls, 0, reason: 'dispose 后建出来的 controller 永远无人回收');
+      expect(bf.created, isEmpty);
+    });
+
+    test('release / evict / holds 是安全的空操作', () async {
+      final bf = _FakeFactory();
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf));
+      await pool.acquire(_src('https://x/a.mp4'));
+      await pool.dispose();
+
+      expect(() => pool.release('https://x/a.mp4'), returnsNormally);
+      await expectLater(pool.evict('https://x/a.mp4'), completes);
+      expect(pool.holds('https://x/a.mp4'), isFalse);
+    });
+  });
 }

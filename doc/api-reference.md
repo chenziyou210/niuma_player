@@ -276,6 +276,19 @@ await pool.dispose();
 preload 挤掉。preload 在容量满且没有 inactive 可回收时会跳过。Android feed 这类
 MediaCodec 资源敏感场景可以在离屏后调用 `evict`，不要只依赖 stale timer 延迟回收。
 
+持有是**计数**的：同一 key 每 `acquire` 一次计数 +1，每 `release` 一次 −1，归零才算
+inactive——两个页面同时持有同一条视频时，一个页面 release 不会让另一个页面手里的
+controller 被回收。**`acquire` 与 `release` 必须成对**，只 acquire 不 release 的条目永远
+不会被池回收。
+
+key 默认由 `NiumaPlayerPool.keyFor` 计算：network 且无 headers 时就是 URL；带 headers
+或非 network 类型会拼进 key，避免同 URL 不同鉴权信息复用同一个 controller。要按自己的
+规则（比如按视频 id 而不是 CDN URL）复用，传 `keyBuilder`，之后 release / evict / holds
+的 key 用 `pool.keyOf(source)` 计算。
+
+`dispose()` 之后再 `acquire` / `preload` 会抛 `StateError`；`release` / `evict` / `holds`
+为安全空操作。
+
 ---
 
 ## 工具函数

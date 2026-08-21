@@ -38,6 +38,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `NiumaMediaSource.lines` 构造时拒绝重复的线路 id，并复制成不可变列表，
     调用方之后改动传入的 List 不再影响已构造的 source。
   - 新增 `test/multi_line_contract_test.dart`。
+- **`NiumaPlayerPool` 持有模型收紧。**
+  - 持有改为**计数**：同一 key 被多个消费者 `acquire` 时，一个 `release`
+    不再让另一个仍在用的 controller 变成 LRU / stale 的回收对象；所有持有者
+    都 `release` 后才可回收（此前是 Set，任一 release 即可回收）。多余的
+    `release` 不会把计数打负。**调用方须保证 `acquire` 与 `release` 次数配对。**
+  - 默认 key（`keyFor`）改为复合：network 且无 headers 时仍是裸 URL（向后
+    兼容），非 network 类型追加 `|type=…`，带 headers 追加排序后的
+    `|h=k=v;…`——同 URL 不同鉴权信息不再错误复用同一个 controller。
+  - 新增构造参数 `keyBuilder` 与实例方法 `keyOf(source)`，可自定义 key
+    策略（自定义后 release / evict / holds 的 key 请用 `keyOf` 计算）。
+  - `dispose()` 之后 `acquire` / `preload` 抛 `StateError`（此前会静默建出
+    永远无人回收的 controller）；`release` / `evict` / `holds` 为安全空操作。
 
 ## [0.5.2] - 2026-07-27
 
