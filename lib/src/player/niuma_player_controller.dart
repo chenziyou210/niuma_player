@@ -87,8 +87,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 收紧上限调低 maxAttempts / initTimeout。
   final RetryPolicy retryPolicy;
 
-  /// 向后兼容访问器：当前激活线路的数据源。
-  NiumaDataSource get dataSource => source.currentLine.source;
+  /// 向后兼容访问器：当前激活线路（[activeLineId]）的数据源——failover /
+  /// [switchLine] 之后跟着实际在播的线路走，不是默认线路。
+  NiumaDataSource get dataSource =>
+      source.lineById(activeLineId)?.source ?? source.currentLine.source;
 
   /// 行为选项。
   final NiumaPlayerOptions options;
@@ -114,10 +116,17 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     if (_disposed || epoch != _epoch) throw _LifecycleCanceled();
   }
 
-  /// 当前激活线路的 id。初始值 = `source.defaultLineId`，[switchLine] 成功后更新。
+  /// 当前**实际在播**线路的 id。初始值 = `source.defaultLineId`；首播
+  /// failover 落到备线路、或 [switchLine] 成功后更新——只在拉起成功后写，
+  /// 切换进行中仍指向原线路。
   String get activeLineId => _activeLineId ?? source.defaultLineId;
 
   String? _activeLineId;
+
+  /// Android：本会话内 IJK 已成功接管过（vp 起不来）。之后的 [switchLine] /
+  /// 回滚直接用 IJK 拉目标线路，不再让 vp 失败一次。同一媒体的各线路编码
+  /// 通常一致，这个记忆才成立；[load] 换媒体时清掉，新媒体重新给 vp 机会。
+  bool _sessionPrefersNative = false;
 
   final StreamController<NiumaPlayerEvent> _eventController =
       StreamController<NiumaPlayerEvent>.broadcast(sync: true);
@@ -192,6 +201,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final epoch = ++_epoch; // 压倒一切在途的 initialize / load / switchLine
     _source = newSource;
     _activeLineId = newSource.defaultLineId;
+    _sessionPrefersNative = false; // 新媒体重新给 vp 机会
     final backend = _backend;
     // 初始化还在途的 backend 不能原地换源（半初始化状态下 load 的结果
     // 不可预期），这种情况走重建。
@@ -270,21 +280,30 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         errorCode: vpError.toString(),
       ));
       await _disposeCurrentBackend();
-      // 多线路遍历会把 _activeLineId 停在最后一条失败线，而 IJK 兜底实际
-      // 播的是默认线路——先校正，别让 activeLineId 撒谎。
+      // IJK 兜底播的是默认线路。
+      await _initNativeAfterVpFailure(source.currentLine.source, epoch, vpError);
       _activeLineId = source.defaultLineId;
-      try {
-        await _initNative(source.currentLine.source, epoch);
-      } on _LifecycleCanceled {
-        rethrow;
-      } catch (ijkError, st) {
-        // 两内核都失败：合成双段错误一起抛，避免 IJK 的错掩盖 vp 的根因。
-        Error.throwWithStackTrace(
-          EngineFallbackFailure(primary: vpError, fallback: ijkError),
-          st,
-        );
-      }
     }
+  }
+
+  /// vp 失败后的 IJK 兜底：IJK 也失败时合成双段错误一起抛，避免 IJK 的错
+  /// 掩盖 vp 的根因；成功则记住本会话此后切线直接走 IJK。
+  Future<void> _initNativeAfterVpFailure(
+    NiumaDataSource raw,
+    int epoch,
+    Object vpError,
+  ) async {
+    try {
+      await _initNative(raw, epoch);
+    } on _LifecycleCanceled {
+      rethrow;
+    } catch (ijkError, st) {
+      Error.throwWithStackTrace(
+        EngineFallbackFailure(primary: vpError, fallback: ijkError),
+        st,
+      );
+    }
+    _sessionPrefersNative = true;
   }
 
   /// 单次拉起序列：dispose 旧 backend → 重跑 middleware（URL/headers 新鲜）
@@ -328,24 +347,27 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       options.useAndroidPlatformView &&
       await NiumaCapabilities.androidSdkInt() != 28;
 
-  /// video_player 主路径初始化：autoFailover 开且多线路时按 priority 升序
-  /// 全遍历，否则只试 defaultLine；全失败抛最后一条错误。
+  /// video_player 主路径初始化：先试 defaultLine；autoFailover 开且多线路时
+  /// 失败后把其余线路按 priority 升序逐条再试；全失败抛最后一条错误。
   Future<void> _initVideoPlayer(int epoch) async {
     final platformView = await _vpUsePlatformView();
-    final candidates =
-        (options.autoFailoverOnInitialError && source.lines.length > 1)
-            ? ([...source.lines]
-              ..sort((a, b) => a.priority.compareTo(b.priority)))
-            : <MediaLine>[source.currentLine];
+    final defaultLine = source.currentLine;
+    final candidates = <MediaLine>[defaultLine];
+    if (options.autoFailoverOnInitialError && source.lines.length > 1) {
+      candidates.addAll(
+        source.lines.where((l) => l.id != defaultLine.id).toList()
+          ..sort((a, b) => a.priority.compareTo(b.priority)),
+      );
+    }
 
     Object? lastError;
     StackTrace? lastStack;
     for (var i = 0; i < candidates.length; i++) {
       final line = candidates[i];
       try {
-        _activeLineId = line.id;
         await _withRetry(() => _bringUp(
             epoch, line.source, (r) => _createVideoPlayer(r, platformView)));
+        _activeLineId = line.id;
         _emit(const BackendSelected(
           PlayerBackendKind.videoPlayer,
           fromMemory: false,
@@ -366,6 +388,14 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       }
     }
     Error.throwWithStackTrace(lastError!, lastStack ?? StackTrace.current);
+  }
+
+  /// 单线路的 video_player 拉起（带重试；每次重试整链重建——复用同一个
+  /// 失败 backend 反复 initialize 是打不活的）。[switchLine] / 回滚用。
+  Future<void> _bringUpVideoPlayer(NiumaDataSource raw, int epoch) async {
+    final platformView = await _vpUsePlatformView();
+    await _withRetry(() =>
+        _bringUp(epoch, raw, (r) => _createVideoPlayer(r, platformView)));
   }
 
   /// IJK 软解兜底初始化。[raw] 为目标线路的原始数据源——middleware 在每次
@@ -610,18 +640,30 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       throw ArgumentError.value(lineId, 'lineId', 'unknown line id');
     }
     _ensureCurrent(epoch);
-    _activeLineId = lineId;
 
-    if (!_platform.isIOS && !_platform.isWeb && options.forceIjkOnAndroid) {
-      // Android 且显式强制 IJK——用目标线路的源，别再用默认线。
+    if (_platform.isIOS || _platform.isWeb) {
+      await _bringUpVideoPlayer(target.source, epoch);
+    } else if (options.forceIjkOnAndroid || _sessionPrefersNative) {
+      // 显式强制 IJK，或本会话 vp 已证明起不来——直接用 IJK 拉目标线路。
       await _initNative(target.source, epoch);
     } else {
-      // 三端统一 video_player 主路径；每次重试整链重建（复用同一个失败
-      // backend 反复 initialize 是打不活的）。
-      final platformView = await _vpUsePlatformView();
-      await _withRetry(() => _bringUp(
-          epoch, target.source, (r) => _createVideoPlayer(r, platformView)));
+      // 与首播同一套规则：vp 失败 → 当次会话内 IJK 兜底，而不是让切线失败。
+      try {
+        await _bringUpVideoPlayer(target.source, epoch);
+      } on _LifecycleCanceled {
+        rethrow;
+      } catch (vpError) {
+        _emit(FallbackTriggered(
+          FallbackReason.error,
+          errorCode: vpError.toString(),
+        ));
+        await _disposeCurrentBackend();
+        await _initNativeAfterVpFailure(target.source, epoch, vpError);
+      }
     }
+    // 拉起成功才算切到：切换进行中 activeLineId 仍指向原线路。
+    _activeLineId = lineId;
+
     // _bringUp 成功返回即保证代际仍然有效、_backend 就是刚拉起的那个。
     if (savedPos > Duration.zero) {
       await _backend!.seekTo(savedPos);

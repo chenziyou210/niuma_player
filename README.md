@@ -185,7 +185,7 @@ NiumaPlayerOptions(
 )
 ```
 
-- 内核选择**完全显式**：默认官方 `video_player`（ExoPlayer 硬解）；初始化失败当次会话内自动用 IJK 软解兜底重试一次（不落盘）。双内核都失败抛 `EngineFallbackFailure`（同时携带两段原始错误）。
+- 内核选择**完全显式**：默认官方 `video_player`（ExoPlayer 硬解）；初始化失败当次会话内自动用 IJK 软解兜底重试一次（不落盘）；`switchLine()` 同样适用，且一旦本会话回退过 IJK，同一媒体后续切线直接走 IJK（`load()` 换媒体后重新给 vp 机会）。双内核都失败抛 `EngineFallbackFailure`（同时携带两段原始错误）。
 - **媒体能力探测**：`await NiumaCapabilities.supportsHevc()` —— Android 查硬解、iOS 恒 true、web 探 MSE/canPlayType。用于向服务端协商 H265 源（协议字段业务自定，SDK 不自动加请求头）。
 
 ### NiumaPlayerValue（监听这个拼 UI）

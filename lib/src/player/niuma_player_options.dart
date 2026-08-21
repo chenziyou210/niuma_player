@@ -46,8 +46,8 @@ class NiumaPlayerOptions {
   /// 与 [autoFailoverOnInitialError] 独立。
   final bool rollbackOnSwitchFailure;
 
-  /// 多线路时首次 initialize 是否把**全部线路**按 priority 升序遍历（含默认
-  /// 线路——defaultLine 指向非最低 priority 线路时它不保证先试），全失败才
-  /// 抛最后一条错误 → `PlayerPhase.error`。默认 `true`；单线路本 flag 无效。
+  /// 多线路时首次 initialize 默认线路失败后，是否把**其余线路**按 priority
+  /// 升序逐条再试（默认线路永远先试），全失败才抛最后一条错误 →
+  /// `PlayerPhase.error`。默认 `true`；单线路本 flag 无效。
   final bool autoFailoverOnInitialError;
 }

@@ -24,6 +24,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     的 `<video>` 调 `load()`。
   - 新增 `test/controller_concurrency_test.dart` 覆盖上述交错序列；
     测试替身抽到 `test/helpers/fakes.dart` 共享。
+- **多线路契约与实现对齐。**
+  - 首播顺序：`defaultLineId` 线路永远先试；`autoFailoverOnInitialError` 只决定
+    失败后是否把**其余**线路按 priority 升序再试（此前是全部线路按 priority
+    排序，默认线路可能不是第一个——与文档不符）。
+  - `activeLineId` / `dataSource` 现在指向**实际在播**的线路：failover 落到
+    备线路、`switchLine` 成功后跟着更新；切换进行中仍是原线路（此前
+    `dataSource` 恒为默认线路，`activeLineId` 在拉起之前就改了）。
+  - Android：`switchLine()` 与首播同一套规则——目标线路 vp 起不来时当次会话
+    内 IJK 兜底，而不是切线失败；本会话回退过 IJK 后，同一媒体的后续切线 /
+    回滚直接走 IJK，`load()` 换媒体时清除该记忆（此前回退后切线会重新尝试
+    vp，失败 + 回滚失败后播放器直接不可播）。
+  - `NiumaMediaSource.lines` 构造时拒绝重复的线路 id，并复制成不可变列表，
+    调用方之后改动传入的 List 不再影响已构造的 source。
+  - 新增 `test/multi_line_contract_test.dart`。
 
 ## [0.5.2] - 2026-07-27
 

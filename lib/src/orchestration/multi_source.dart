@@ -75,17 +75,18 @@ class NiumaMediaSource {
   }) {
     _validateThumbnailVtt(thumbnailVtt);
     return NiumaMediaSource._(
-      lines: [
+      lines: List<MediaLine>.unmodifiable([
         MediaLine(id: 'default', label: 'default', source: source),
-      ],
+      ]),
       defaultLineId: 'default',
       thumbnailVtt: thumbnailVtt,
     );
   }
 
-  /// 从显式的 [MediaLine] 列表创建。[lines] 必须非空，[defaultLineId]
-  /// 必须匹配其中一条，否则抛 [ArgumentError]；[thumbnailVtt] 校验同
-  /// [NiumaMediaSource.single]。
+  /// 从显式的 [MediaLine] 列表创建。[lines] 必须非空且 id 互不重复，
+  /// [defaultLineId] 必须匹配其中一条，否则抛 [ArgumentError]；
+  /// [thumbnailVtt] 校验同 [NiumaMediaSource.single]。
+  /// [lines] 会被复制成不可变列表，之后改动调用方的 List 不影响本对象。
   factory NiumaMediaSource.lines({
     required List<MediaLine> lines,
     required String defaultLineId,
@@ -94,7 +95,13 @@ class NiumaMediaSource {
     if (lines.isEmpty) {
       throw ArgumentError.value(lines, 'lines', 'must not be empty');
     }
-    if (!lines.any((l) => l.id == defaultLineId)) {
+    final seen = <String>{};
+    for (final l in lines) {
+      if (!seen.add(l.id)) {
+        throw ArgumentError.value(lines, 'lines', 'duplicate line id "${l.id}"');
+      }
+    }
+    if (!seen.contains(defaultLineId)) {
       throw ArgumentError.value(
         defaultLineId,
         'defaultLineId',
@@ -103,7 +110,7 @@ class NiumaMediaSource {
     }
     _validateThumbnailVtt(thumbnailVtt);
     return NiumaMediaSource._(
-      lines: lines,
+      lines: List<MediaLine>.unmodifiable(lines),
       defaultLineId: defaultLineId,
       thumbnailVtt: thumbnailVtt,
     );
@@ -141,7 +148,7 @@ class NiumaMediaSource {
     }
   }
 
-  /// 本 source 可用的有序播放线路列表。
+  /// 本 source 可用的有序播放线路列表（不可变副本，id 互不重复）。
   final List<MediaLine> lines;
 
   /// 默认激活线路的 [MediaLine.id]，构造时已校验存在于 [lines]。
