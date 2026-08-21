@@ -334,6 +334,8 @@ HLS 在 Chrome / Firefox / Edge 走核内置的 vendored `hls.js`（`assets/hls/
 - **iOS Safari `<video>.volume` setter 只读**：核同步设 `muted` 解决"按钮静音不生效"。
 - **iOS Safari `videoWidth/Height` 滞后**：`onLoadedMetadata` 时尺寸可能仍是 0，核在 `onPlaying` / `onTimeUpdate` 时 retry 同步 `value.size`。
 - **iOS Safari 有声自动播 = 单 `<video>` 复用 + 用户手势激活**：WebKit 要求带声音播放在用户手势同步栈内，且激活绑在同一个 `<video>` 元素上。feed 这类滑动自动播场景应**复用一个 controller**（`controller.load(newSource)` 换源、不每条新建），用户首次点击时 unmute 建立激活，之后换源持续有声；每条新建 `<video>` 会丢激活 → 只能静音（详见 `example/lib/feed_demo/`）。
+- **自定义 headers 只在 hls.js 路径生效**：浏览器 `<video>` 的原生媒体请求无法由 JS 附加请求头——普通 mp4 和 Safari / iOS 原生 HLS 都**不会**发送 `NiumaDataSource.headers`，只有 Chrome / Firefox / Edge 走 hls.js 时经 XHR 注入（`cookie` / `referer` 等 forbidden headers 仍被拒）。web 鉴权请用签名 URL 或 query token。
+- **直播 HLS 的 `value.duration` 为 0**：`<video>.duration` 为 `Infinity` 时核在拿到元数据后即视为就绪（不再等到 `initTimeout`），总时长按 0 上报，自家 UI 据此隐藏进度条总长。
 - **iOS Safari Flutter 控件被 `<video>` 吞**：叠在 `<video>` platform-view 上的 Flutter 控件，落在视频像素区的点击收不到。把关键按钮放视频画面外（如 AppBar），或用 `controller.setWebNativeControls(true)` 开浏览器原生控件兜底。
 
 ---

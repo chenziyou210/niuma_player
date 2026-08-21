@@ -27,6 +27,9 @@ jobs:
       - name: flutter test
         run: flutter test --coverage
 
+      - name: flutter test (browser, WebVideoBackend)
+        run: flutter test --platform chrome test/web
+
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v4

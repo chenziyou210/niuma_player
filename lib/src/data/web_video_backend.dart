@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;
 
 import 'package:niuma_player/src/data/hls_detect.dart';
+import 'package:niuma_player/src/data/web_media_readiness.dart';
 import 'package:niuma_player/src/domain/data_source.dart';
 import 'package:niuma_player/src/domain/player_backend.dart';
 import 'package:niuma_player/src/domain/player_state.dart';
@@ -17,12 +18,17 @@ import 'package:niuma_player/src/niuma_sdk_assets.dart';
 /// 不依赖 `package:video_player` 的 web 实现——绕开其单全局 `<video>`、
 /// 手势被拦、全屏搬迁黑屏等限制。web 平台无 PiP 强制 / 投屏 / 亮度音量 API。
 class WebVideoBackend extends PlayerBackend {
-  WebVideoBackend(this._dataSource) : _viewType = 'niuma-video-${_nextId++}' {
-    final headers = _dataSource.headers ?? const <String, String>{};
+  /// [hlsJsLoader] 负责保证全局 `Hls` 可用（默认懒注入 vendored hls.js）；
+  /// 宿主页面自带 hls.js 或需要别的加载方式时可替换。
+  WebVideoBackend(this._dataSource, {Future<void> Function()? hlsJsLoader})
+      : _hlsJsLoader = hlsJsLoader ?? _ensureHlsJsLoaded,
+        _viewType = 'niuma-video-${_nextId++}' {
+    // 不设 crossOrigin：<video> 原生请求本来就带不上自定义 header，设成
+    // anonymous 只会让没配 CORS 的服务器拒掉本来能播的 mp4，还会丢 cookie。
+    // headers 只在 hls.js 的 XHR 路径（xhrSetup）真正注入。
     _video = web.document.createElement('video') as web.HTMLVideoElement
       ..autoplay = false
-      ..controls = false
-      ..crossOrigin = headers.isNotEmpty ? 'anonymous' : null;
+      ..controls = false;
     _video.style
       ..setProperty('pointer-events', 'none')
       ..setProperty('object-fit', 'contain')
@@ -58,8 +64,13 @@ class WebVideoBackend extends PlayerBackend {
   /// 当前数据源；[load] 换源时更新，`<video>` 元素复用不重建。
   NiumaDataSource _dataSource;
   final String _viewType;
+  final Future<void> Function() _hlsJsLoader;
   late final web.HTMLVideoElement _video;
   late final web.HTMLDivElement _wrapper;
+
+  /// 底层 `<video>` 元素。供宿主做核不覆盖的 DOM 级操作（挂字幕轨、
+  /// 读 `videoTracks` 等）；别改它的 src / 事件监听，那是 backend 的职责。
+  web.HTMLVideoElement get htmlVideoElement => _video;
 
   /// 当前源是否需要 hls.js。
   bool _useHlsJs = false;
@@ -81,8 +92,30 @@ class WebVideoBackend extends PlayerBackend {
   Duration? _pendingSeek;
   Timer? _seekSafetyTimer;
 
-  /// [initialize] 等待的 completer——让上层立刻得知 load 成败，不等 initTimeout。
+  /// [initialize] / [load] 等待的 completer——让上层立刻得知成败，不等 initTimeout。
   Completer<void>? _initCompleter;
+
+  /// 源代际：每次 [initialize] / [load] 递增。跨 await 回来的旧 load 发现
+  /// 代际不符就退出，不再为旧源建 Hls / 改 src；旧 completer 在新 load 开始
+  /// 时即以 [StateError] 结束，调用方不用等 initTimeout。
+  int _gen = 0;
+
+  /// 开启新一代加载：作废上一代还挂着的 completer，返回本代的 completer。
+  Completer<void> _beginGeneration() {
+    _gen++;
+    final stale = _initCompleter;
+    if (stale != null && !stale.isCompleted) {
+      // 调用方可能已经不再等这个 future（controller 侧被代际压倒后就不等了），
+      // 先 ignore 再 completeError，避免变成 unhandled async error。
+      stale.future.ignore();
+      stale.completeError(
+        StateError('WebVideoBackend load superseded by a newer load'),
+      );
+    }
+    final completer = Completer<void>();
+    _initCompleter = completer;
+    return completer;
+  }
 
   NiumaPlayerValue _value = NiumaPlayerValue.uninitialized();
   final StreamController<NiumaPlayerValue> _valueController =
@@ -134,18 +167,18 @@ class WebVideoBackend extends PlayerBackend {
     _emit(next);
   }
 
-  /// duration 就绪即认为 init 完成，once-only。
+  /// 元数据就绪即认为 init 完成，once-only。直播（duration=Infinity）在
+  /// HAVE_METADATA 就算就绪，见 [isWebMediaReady]。
   void _maybeMarkInitialized() {
     if (_initialized || _disposed) return;
     final dur = _video.duration;
-    final hasDuration = dur.isFinite && dur > 0;
-    if (!hasDuration) return;
+    if (!isWebMediaReady(duration: dur, readyState: _video.readyState)) return;
     _initialized = true;
     final w = _video.videoWidth;
     final h = _video.videoHeight;
     _emit(_value.copyWith(
       phase: _video.paused ? PlayerPhase.ready : PlayerPhase.playing,
-      duration: Duration(milliseconds: (dur * 1000).round()),
+      duration: webDurationToValue(dur),
       size: w > 0 && h > 0 ? Size(w.toDouble(), h.toDouble()) : Size.zero,
     ));
     final c = _initCompleter;
@@ -279,13 +312,15 @@ class WebVideoBackend extends PlayerBackend {
 
   }
 
+  /// 同步返回本代 completer 的 future：hls.js 的异步加载在后台进行，这样
+  /// 调用方拿到 future 的时刻一定早于它可能被下一次 load 作废的时刻。
   @override
-  Future<void> initialize() async {
-    if (_disposed) return;
-    final completer = Completer<void>();
-    _initCompleter = completer;
+  Future<void> initialize() {
+    if (_disposed) return Future<void>.value();
+    final completer = _beginGeneration();
+    final gen = _gen;
     if (_useHlsJs) {
-      await _initHlsJs();
+      unawaited(_initHlsJs(gen));
     } else {
       _video.load();
     }
@@ -296,8 +331,8 @@ class WebVideoBackend extends PlayerBackend {
   bool get supportsSourceSwap => true;
 
   @override
-  Future<void> load(NiumaDataSource source) async {
-    if (_disposed) return;
+  Future<void> load(NiumaDataSource source) {
+    if (_disposed) return Future<void>.value();
     // 复用同一 <video> 元素与 platform-view，保住 iOS Safari 的
     // 「有声播放激活」（新建元素会丢激活、自动播被静音）。
     _intendedPlaying = false;
@@ -312,15 +347,13 @@ class WebVideoBackend extends PlayerBackend {
       _hls = null;
     }
     _dataSource = source;
-    final headers = source.headers ?? const <String, String>{};
-    _video.crossOrigin = headers.isNotEmpty ? 'anonymous' : null;
     _useHlsJs = isHlsUrl(source.uri) && !_isAppleWebKit() && _hasMse();
     _value = NiumaPlayerValue.uninitialized();
     _emit(_value);
-    final completer = Completer<void>();
-    _initCompleter = completer;
+    final completer = _beginGeneration();
+    final gen = _gen;
     if (_useHlsJs) {
-      await _initHlsJs();
+      unawaited(_initHlsJs(gen));
     } else {
       _video.src = source.uri;
       _video.load();
@@ -329,17 +362,35 @@ class WebVideoBackend extends PlayerBackend {
   }
 
   /// 加载 hls.js → 检查 MSE → attachMedia + loadSource；失败走 [_failInit]。
-  Future<void> _initHlsJs() async {
+  /// [gen] 是发起时的代际：脚本加载的 await 回来后若已被更新的 load 压倒，
+  /// 直接退出——否则会用新源的 uri 再建一个无人持有的 Hls。
+  Future<void> _initHlsJs(int gen) async {
     try {
-      await _ensureHlsJsLoaded();
+      await _hlsJsLoader();
     } catch (e) {
+      if (_disposed || gen != _gen) return;
       _failInit(PlayerError(
         category: PlayerErrorCategory.network,
         message: 'hls.js failed to load: $e',
       ));
       return;
     }
-    if (_disposed) return;
+    if (_disposed || gen != _gen) return;
+    try {
+      _attachHls();
+    } catch (e) {
+      // JS interop 抛出（Hls 构造 / attachMedia 失败等）：落到 error 态，
+      // 让 await initialize()/load() 的调用方立刻得知，而不是 unhandled。
+      if (_disposed || gen != _gen) return;
+      _failInit(PlayerError(
+        category: PlayerErrorCategory.unknown,
+        message: 'hls.js setup failed: $e',
+      ));
+    }
+  }
+
+  /// 检查 MSE → 建 Hls → attachMedia + loadSource。同步，仅当前代调用。
+  void _attachHls() {
     final hlsCtor = globalContext.getProperty('Hls'.toJS) as JSFunction;
     final supported = (hlsCtor.getProperty('isSupported'.toJS) as JSFunction)
         .callAsFunction(hlsCtor) as JSBoolean?;
@@ -353,8 +404,16 @@ class WebVideoBackend extends PlayerBackend {
     final hls = hlsCtor.callAsConstructor<JSObject>(_buildHlsConfig());
     _hls = hls;
     // 只映射 fatal error；非 fatal 交给 hls.js 自愈，fatal 上抛给
-    // orchestration 层 failover，backend 内不自己 retry。
-    hls.callMethod('on'.toJS, 'hlsError'.toJS, _onHlsError.toJS);
+    // orchestration 层 failover，backend 内不自己 retry。回调绑定到本实例：
+    // 换源后旧实例迟到的错误不得打到新源头上。
+    hls.callMethod(
+      'on'.toJS,
+      'hlsError'.toJS,
+      ((JSAny? _, JSObject data) {
+        if (!identical(hls, _hls)) return;
+        _onHlsError(data);
+      }).toJS,
+    );
     hls.callMethod('attachMedia'.toJS, _video as JSObject);
     hls.callMethod('loadSource'.toJS, _dataSource.uri.toJS);
   }
@@ -388,7 +447,7 @@ class WebVideoBackend extends PlayerBackend {
     return config;
   }
 
-  void _onHlsError(JSAny _, JSObject data) {
+  void _onHlsError(JSObject data) {
     if (_disposed) return;
     final fatal = data.getProperty<JSBoolean?>('fatal'.toJS)?.toDart ?? false;
     if (!fatal) return;

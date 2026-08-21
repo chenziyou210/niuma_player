@@ -19,6 +19,12 @@ class NiumaDataSource {
   final String uri;
 
   /// 可选的 HTTP headers（仅对 [NiumaSourceType.network] 有意义）。
+  ///
+  /// **Web 限制**：浏览器 `<video>` 的原生媒体请求无法由 JS 附加请求头——
+  /// 普通 mp4、以及 Safari / iOS 的原生 HLS 都**不会**发送这里的 headers；
+  /// 只有走 hls.js（Chrome / Firefox / Edge 的 HLS）时经 XHR 注入，且
+  /// `cookie` / `referer` 等 forbidden headers 仍会被浏览器拒绝。web 上的鉴权
+  /// 请改用签名 URL 或 query token。
   final Map<String, String>? headers;
 
   /// 网络 source（http/https/hls 等）。

@@ -47,6 +47,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `NiumaMediaSource.lines` 构造时拒绝重复的线路 id，并复制成不可变列表，
     调用方之后改动传入的 List 不再影响已构造的 source。
   - 新增 `test/multi_line_contract_test.dart`。
+- **`WebVideoBackend` 换源 / 直播 / headers 三处契约缺口。**
+  - 直播 HLS（`<video>.duration = Infinity`，Safari / iOS 原生 HLS 必现）此前
+    因"duration 必须有限且 > 0"永远初始化不完，等到 `initTimeout` 后被当成网络
+    错误 failover；现在拿到元数据（`HAVE_METADATA`）即就绪，`value.duration`
+    上报 0。判定抽成纯函数 `isWebMediaReady` / `webDurationToValue`。
+  - `load()` 引入源代际：快速连续 `load()` 时旧的 completer 立刻以
+    `StateError("… superseded")` 结束（不再等 30s 超时），跨 hls.js 脚本加载
+    的 await 回来的旧 load 不再用新源 uri 多建一个无人持有的 `Hls`；hls.js
+    错误回调绑定到实例，换源后旧实例迟到的 fatal 错误不会把新源打成 error。
+    `initialize()` / `load()` 改为同步返回 future。
+  - 不再在传了 headers 时把 `<video>.crossOrigin` 设成 `anonymous`：原生媒体
+    请求本来就带不上自定义 header，anonymous 只会让没配 CORS 的服务器拒掉
+    本来能播的 mp4、并丢掉 cookie。`NiumaDataSource.headers` dartdoc 与
+    README 写明 web 上 headers 只在 hls.js 路径生效。
+  - 新增构造参数 `WebVideoBackend(hlsJsLoader:)` 与 `htmlVideoElement` getter。
+  - 新增 `test/web/web_video_backend_test.dart`（真浏览器，
+    `flutter test --platform chrome test/web`，CI 已接入）与
+    `test/web_media_readiness_test.dart`。
 - **`NiumaPlayerPool` 持有模型收紧。**
   - 持有改为**计数**：同一 key 被多个消费者 `acquire` 时，一个 `release`
     不再让另一个仍在用的 controller 变成 LRU / stale 的回收对象；所有持有者
