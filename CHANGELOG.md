@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Controller 并发操作竞态：`load()` / `switchLine()` 现在是"最后一次说了算"。**
+  此前代际守卫只在 bring-up 的第一个 await 之前检查一次，且 `switchLine()`
+  根本不递增代际；`load()` 打断卡在 middleware（签名 URL 等）里的
+  `initialize()`、或两次 `switchLine()` 交错时，先发的旧链醒来后会把自己的
+  backend 挂回去、拆掉新链的订阅，造成**画面是旧源 / `activeLineId` 与实际
+  播放线路不一致 / 平台播放器泄漏 / `BackendSelected` 重复**。现在每个
+  破坏性操作开始时递增代际，在途链在每个 await 之后复查，过期链在造 backend
+  之前退出（造了也自行销毁）。
+  - 被压倒的 `initialize()` / `load()` / `switchLine()` future 以
+    `StateError("… superseded or disposed")` 结束；被压倒的 `switchLine()`
+    不回滚、不发 `LineSwitchFailed`；生命周期取消不再写 `value.error`。
+  - web 原地换源：`initialize()` 还在途时 `load()` 改走重建，不再对半初始化
+    的 `<video>` 调 `load()`。
+  - 新增 `test/controller_concurrency_test.dart` 覆盖上述交错序列；
+    测试替身抽到 `test/helpers/fakes.dart` 共享。
+
 ## [0.5.2] - 2026-07-27
 
 ### Changed

@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:niuma_player/niuma_player.dart';
 
-import '../state_machine_test.dart' show FakePlayerBackend, FakePlatformBridge;
+import '../helpers/fakes.dart' show FakePlayerBackend, FakePlatformBridge;
 
 class _RecordingFactory implements BackendFactory {
   final List<bool> vpFlags = <bool>[];

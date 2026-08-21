@@ -102,18 +102,22 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   Completer<void>? _initCompleter;
   bool _disposed = false;
 
-  /// 代际号：[load]（非换源路径）与 [dispose] 递增。仍在退避重试中的旧
-  /// init 链在下一次 attempt 时发现代际不符即自行终止，防止旧链复活旧源 /
-  /// 泄漏新建 backend。
+  /// 代际号：每个破坏性操作（[load] / [switchLine] / [dispose]）开始时递增，
+  /// 语义是"最新的操作压倒一切在途操作"。在途链在**每个 await 之后**都用
+  /// [_ensureCurrent] 复查——await 期间什么都可能发生——发现代际不符即抛
+  /// [_LifecycleCanceled] 自行终止，并销毁自己刚造的 backend，防止旧链复活
+  /// 旧源 / 拆掉新链的订阅 / 泄漏平台播放器。
   int _epoch = 0;
+
+  /// 代际守卫：[epoch] 已被更晚的操作压倒或已 dispose 时抛 [_LifecycleCanceled]。
+  void _ensureCurrent(int epoch) {
+    if (_disposed || epoch != _epoch) throw _LifecycleCanceled();
+  }
 
   /// 当前激活线路的 id。初始值 = `source.defaultLineId`，[switchLine] 成功后更新。
   String get activeLineId => _activeLineId ?? source.defaultLineId;
 
   String? _activeLineId;
-
-  /// 经过 [middlewares] 流水线后的数据源。
-  NiumaDataSource? _resolvedSource;
 
   final StreamController<NiumaPlayerEvent> _eventController =
       StreamController<NiumaPlayerEvent>.broadcast(sync: true);
@@ -156,8 +160,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         if (isCurrent) _initCompleter = null;
         // 失败必须同步落到 value（phase=error）：否则调用方没 catch future 时
         // value 驱动的 UI 永远等不到 error 态，用户只看到无限转圈。
-        // 已被 load() 取代的旧链不写——避免覆盖新链的正常状态。
-        if (isCurrent && !_disposed) {
+        // 已被 load() 取代的旧链不写——避免覆盖新链的正常状态；生命周期
+        // 取消也不写——它不是媒体错误，新链马上会接管 value。
+        if (isCurrent && !_disposed && e is! _LifecycleCanceled) {
           value = value.copyWith(
             phase: PlayerPhase.error,
             error: PlayerError(
@@ -174,22 +179,34 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   /// 原地换到新源 [newSource]，尽量复用当前 backend。
   /// web 上复用同一 `<video>` 换 src 可保住 iOS Safari 的有声播放激活；
-  /// backend 不支持换源时自动 dispose + 重建。
+  /// backend 不支持换源（或初始化还在途）时自动 dispose + 重建。
+  ///
+  /// 并发语义：**最后一次调用说了算**。在途的 [initialize] / [load] /
+  /// [switchLine] 会被这次调用压倒，它们的 future 以 [StateError]
+  /// （"superseded or disposed"）结束，既不写 `value.error` 也不触发回退。
+  /// feed 快滑连续 `load()` 时只需关心最后一次的结果。
   Future<void> load(NiumaMediaSource newSource) async {
     if (_disposed) {
       throw StateError('NiumaPlayerController has been disposed');
     }
+    final epoch = ++_epoch; // 压倒一切在途的 initialize / load / switchLine
     _source = newSource;
     _activeLineId = newSource.defaultLineId;
     final backend = _backend;
-    if (backend != null && backend.supportsSourceSwap) {
-      _resolvedSource =
+    // 初始化还在途的 backend 不能原地换源（半初始化状态下 load 的结果
+    // 不可预期），这种情况走重建。
+    final initInFlight =
+        _initCompleter != null && !_initCompleter!.isCompleted;
+    if (backend != null && backend.supportsSourceSwap && !initInFlight) {
+      final resolved =
           await runSourceMiddlewares(newSource.currentLine.source, middlewares);
-      await backend.load(_resolvedSource!).timeout(options.initTimeout);
+      _ensureCurrent(epoch); // 过期的 load 不得把旧源喂给 backend 覆盖新源
+      await backend.load(resolved).timeout(options.initTimeout);
     } else {
-      _epoch++; // 作废可能仍在退避重试中的旧 init 链
-      await _disposeCurrentBackend();
+      // 先作废旧 future：它已被代际压倒，其结果（含取消）不再写 value。
       _initCompleter = null;
+      await _disposeCurrentBackend();
+      _ensureCurrent(epoch); // dispose 期间又来了一次 load：让它去起链
       await initialize();
     }
   }
@@ -215,6 +232,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     while (true) {
       try {
         return await bringUp();
+      } on _LifecycleCanceled {
+        rethrow; // 被压倒 / 已 dispose：无论什么策略都不重试
       } catch (e) {
         final category = _categorize(e);
         if (!retryPolicy.shouldRetry(category, attempt: attempt)) rethrow;
@@ -225,20 +244,23 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   Future<void> _runInitialize() async {
+    // 整条 init 链（含 IJK 兜底）共用开跑时的代际：中途被 load 压倒后，
+    // 兜底也不能再为旧源拉起 IJK。
+    final epoch = _epoch;
     // 三端主路径统一走官方 video_player（iOS AVPlayer / Android ExoPlayer /
     // Web <video>，由官方维护、可随意升级）。Android 额外带 IJK 软解兜底。
     if (_platform.isIOS || _platform.isWeb) {
-      await _initVideoPlayer();
+      await _initVideoPlayer(epoch);
       return;
     }
 
     // Android。
     if (options.forceIjkOnAndroid) {
-      await _initNative(source.currentLine.source);
+      await _initNative(source.currentLine.source, epoch);
       return;
     }
     try {
-      await _initVideoPlayer();
+      await _initVideoPlayer(epoch);
     } on _LifecycleCanceled {
       rethrow; // 快滑换源 / 页面销毁的取消，不是媒体失败。
     } catch (vpError) {
@@ -252,7 +274,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       // 播的是默认线路——先校正，别让 activeLineId 撒谎。
       _activeLineId = source.defaultLineId;
       try {
-        await _initNative(source.currentLine.source);
+        await _initNative(source.currentLine.source, epoch);
+      } on _LifecycleCanceled {
+        rethrow;
       } catch (ijkError, st) {
         // 两内核都失败：合成双段错误一起抛，避免 IJK 的错掩盖 vp 的根因。
         Error.throwWithStackTrace(
@@ -266,18 +290,24 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 单次拉起序列：dispose 旧 backend → 重跑 middleware（URL/headers 新鲜）
   /// → 建新 backend → attach → initialize（带 wall-clock 超时）。
   /// [_initVideoPlayer] / [_initNative] / [_doSwitchTo] 的每次 attempt 共用。
+  ///
+  /// 每个 await 之后都复查 [epoch]：被压倒的链在造 backend 之前就退出
+  /// （无可泄漏）；造出来之后被压倒的，压倒者开跑时已把它当"当前 backend"
+  /// 销毁（见 [_disposeCurrentBackend]），这里只需停止继续操作。
   Future<void> _bringUp(
     int epoch,
     NiumaDataSource raw,
     PlayerBackend Function(NiumaDataSource resolved) create,
   ) async {
-    if (_disposed || epoch != _epoch) {
-      throw _LifecycleCanceled();
-    }
+    _ensureCurrent(epoch);
     await _disposeCurrentBackend();
-    _resolvedSource = await runSourceMiddlewares(raw, middlewares);
-    await _attachBackend(create(_resolvedSource!));
-    await _backend!.initialize().timeout(options.initTimeout);
+    _ensureCurrent(epoch);
+    final resolved = await runSourceMiddlewares(raw, middlewares);
+    _ensureCurrent(epoch);
+    final backend = create(resolved);
+    await _attachBackend(backend, epoch);
+    await backend.initialize().timeout(options.initTimeout);
+    _ensureCurrent(epoch);
   }
 
   PlayerBackend _createVideoPlayer(
@@ -300,8 +330,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   /// video_player 主路径初始化：autoFailover 开且多线路时按 priority 升序
   /// 全遍历，否则只试 defaultLine；全失败抛最后一条错误。
-  Future<void> _initVideoPlayer() async {
-    final epoch = _epoch;
+  Future<void> _initVideoPlayer(int epoch) async {
     final platformView = await _vpUsePlatformView();
     final candidates =
         (options.autoFailoverOnInitialError && source.lines.length > 1)
@@ -322,6 +351,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
           fromMemory: false,
         ));
         return;
+      } on _LifecycleCanceled {
+        rethrow; // 被压倒不是线路失败：不试下一条、不发 LineSwitchFailed
       } catch (e, st) {
         if (e is TimeoutException) {
           // 与 IJK 路径一致：wall-clock 超时发独立信号，便于排障区分。
@@ -339,8 +370,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   /// IJK 软解兜底初始化。[raw] 为目标线路的原始数据源——middleware 在每次
   /// attempt 内重跑。
-  Future<void> _initNative(NiumaDataSource raw) async {
-    final epoch = _epoch;
+  Future<void> _initNative(NiumaDataSource raw, int epoch) async {
     try {
       await _withRetry(() => _bringUp(
             epoch,
@@ -409,15 +439,15 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     }
   }
 
-  Future<void> _attachBackend(PlayerBackend backend) async {
-    if (_disposed) {
-      // dispose 后仍在跑的重试链造出的 backend 必须就地销毁，否则泄漏
-      // 真实平台播放器；StateError 属 unknown 类，各预设 RetryPolicy 均
-      // 不重试，僵尸链就此终止。
+  Future<void> _attachBackend(PlayerBackend backend, int epoch) async {
+    await _detachBackend();
+    // detach 的 await 之后才能赋值——这个空隙里若被 load / switchLine /
+    // dispose 压倒，刚造的 backend 必须就地销毁，否则泄漏真实平台播放器，
+    // 还会把压倒者的 backend 顶掉。
+    if (_disposed || epoch != _epoch) {
       await backend.dispose();
       throw _LifecycleCanceled();
     }
-    await _detachBackend();
     _backend = backend;
     _valueSub = backend.valueStream.listen((v) {
       if (_disposed) return;
@@ -516,6 +546,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 切换到 [lineId] 线路：重建 backend 后 seek 回原位置并恢复播放状态。
   /// 成功依次发 [LineSwitching] / [LineSwitched]，失败发 [LineSwitchFailed]
   /// 并 rethrow；未知 id 抛 [ArgumentError]，同线路静默 no-op。
+  ///
+  /// 并发语义：**最后一次调用说了算**。切换进行中再次 [switchLine] /
+  /// [load]，先前那次被压倒——其 future 以 [StateError]（"superseded or
+  /// disposed"）结束，不回滚、不发 [LineSwitchFailed]；dispose 打断则静默返回。
   Future<void> switchLine(String lineId) async {
     if (_disposed) return;
     final target = source.lineById(lineId);
@@ -525,6 +559,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final fromId = _activeLineId ?? source.defaultLineId;
     if (fromId == lineId) return;
 
+    // 压倒在途的 initialize / load / 上一次 switchLine：并发切线"最后
+    // 一次说了算"，被压倒的那次以 StateError 结束，不回滚、不上报失败。
+    final epoch = ++_epoch;
     _emit(LineSwitching(fromId: fromId, toId: lineId));
 
     // 切换前快照，回滚复用同一份，保证"切失败 = 什么都没发生"。
@@ -532,17 +569,25 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final wasPlaying = value.isPlaying;
 
     try {
-      await _doSwitchTo(lineId, savedPos: savedPos, wasPlaying: wasPlaying);
+      await _doSwitchTo(lineId, epoch,
+          savedPos: savedPos, wasPlaying: wasPlaying);
       _emit(LineSwitched(lineId));
+    } on _LifecycleCanceled {
+      if (_disposed) return; // 页面销毁：静默
+      rethrow; // 被更晚的操作压倒：调用方得知这次没切成
     } catch (e) {
       if (_disposed) return;
       // rollbackOnSwitchFailure：切换失败静默回滚到原线路。
       if (options.rollbackOnSwitchFailure) {
         try {
-          await _doSwitchTo(fromId, savedPos: savedPos, wasPlaying: wasPlaying);
+          await _doSwitchTo(fromId, epoch,
+              savedPos: savedPos, wasPlaying: wasPlaying);
           // 回滚成功：发 LineSwitchFailed 供上报，但不 rethrow。
           _emit(LineSwitchFailed(toId: lineId, error: e));
           return;
+        } on _LifecycleCanceled {
+          if (_disposed) return;
+          rethrow;
         } catch (_) {
           // 回滚也失败——掉到原始错误处理。
         }
@@ -553,8 +598,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   /// [switchLine] 与 rollback 共用：拉起目标线路（重建式重试）→ seek + 续播。
+  /// [epoch] 是发起这次切换时取得的代际，整段共用。
   Future<void> _doSwitchTo(
-    String lineId, {
+    String lineId,
+    int epoch, {
     required Duration savedPos,
     required bool wasPlaying,
   }) async {
@@ -562,28 +609,23 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     if (target == null) {
       throw ArgumentError.value(lineId, 'lineId', 'unknown line id');
     }
-    if (_disposed) return;
+    _ensureCurrent(epoch);
     _activeLineId = lineId;
 
     if (!_platform.isIOS && !_platform.isWeb && options.forceIjkOnAndroid) {
       // Android 且显式强制 IJK——用目标线路的源，别再用默认线。
-      await _initNative(target.source);
+      await _initNative(target.source, epoch);
     } else {
       // 三端统一 video_player 主路径；每次重试整链重建（复用同一个失败
       // backend 反复 initialize 是打不活的）。
-      final epoch = _epoch;
       final platformView = await _vpUsePlatformView();
       await _withRetry(() => _bringUp(
           epoch, target.source, (r) => _createVideoPlayer(r, platformView)));
     }
-    if (_disposed) {
-      await _disposeCurrentBackend();
-      return;
-    }
-
+    // _bringUp 成功返回即保证代际仍然有效、_backend 就是刚拉起的那个。
     if (savedPos > Duration.zero) {
       await _backend!.seekTo(savedPos);
-      if (_disposed) return;
+      _ensureCurrent(epoch);
     }
     if (wasPlaying) {
       await _backend!.play();
