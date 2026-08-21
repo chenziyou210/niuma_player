@@ -123,11 +123,13 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   String? _activeLineId;
 
-  /// 进行中的 [switchLine] 数量（并发切换时可能 >1）。切换期间：候选 backend
-  /// 的 `phase=error` 不写进 [value]（切换失败 = 什么都没发生，由
-  /// [LineSwitchFailed] 通知；回滚不可用时再显式落 error），[value] 的变化
-  /// 也不更新稳定快照。
-  int _switchesInFlight = 0;
+  /// 进行中的"候选拉起"数量：[switchLine]（并发时可能 >1）与 [initialize] /
+  /// [load] 的候选遍历（多线路 failover、IJK 兜底）。期间候选 backend 的
+  /// `phase=error` 不写进 [value]——候选失败不等于播放失败：切换失败会回滚
+  /// （由 [LineSwitchFailed] 通知），首播会试下一条线路 / IJK；只有最终失败
+  /// 才显式把 error 落到 [value]（[initialize] 的 onError、[switchLine] 的
+  /// 无法回滚路径）。期间 [value] 的变化也不更新稳定快照。
+  int _candidateBringUps = 0;
 
   /// 最近一次**稳定**的播放位置 / 是否在播——只在没有切换进行中时随 [value]
   /// 更新。[switchLine] 的"切换前快照"取自这里，而不是当下的 [value]：并发
@@ -266,35 +268,40 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   Future<void> _runInitialize() async {
-    // 整条 init 链（含 IJK 兜底）共用开跑时的代际：中途被 load 压倒后，
-    // 兜底也不能再为旧源拉起 IJK。
-    final epoch = _epoch;
-    // 三端主路径统一走官方 video_player（iOS AVPlayer / Android ExoPlayer /
-    // Web <video>，由官方维护、可随意升级）。Android 额外带 IJK 软解兜底。
-    if (_platform.isIOS || _platform.isWeb) {
-      await _initVideoPlayer(epoch);
-      return;
-    }
-
-    // Android。
-    if (options.forceIjkOnAndroid) {
-      await _initNative(source.currentLine.source, epoch);
-      return;
-    }
+    _candidateBringUps++;
     try {
-      await _initVideoPlayer(epoch);
-    } on _LifecycleCanceled {
-      rethrow; // 快滑换源 / 页面销毁的取消，不是媒体失败。
-    } catch (vpError) {
-      // video_player 失败 → 当次会话内用 IJK 软解兜底重试（不落盘）。
-      _emit(FallbackTriggered(
-        FallbackReason.error,
-        errorCode: vpError.toString(),
-      ));
-      await _disposeCurrentBackend();
-      // IJK 兜底播的是默认线路。
-      await _initNativeAfterVpFailure(source.currentLine.source, epoch, vpError);
-      _activeLineId = source.defaultLineId;
+      // 整条 init 链（含 IJK 兜底）共用开跑时的代际：中途被 load 压倒后，
+      // 兜底也不能再为旧源拉起 IJK。
+      final epoch = _epoch;
+      // 三端主路径统一走官方 video_player（iOS AVPlayer / Android ExoPlayer /
+      // Web <video>，由官方维护、可随意升级）。Android 额外带 IJK 软解兜底。
+      if (_platform.isIOS || _platform.isWeb) {
+        await _initVideoPlayer(epoch);
+        return;
+      }
+
+      // Android。
+      if (options.forceIjkOnAndroid) {
+        await _initNative(source.currentLine.source, epoch);
+        return;
+      }
+      try {
+        await _initVideoPlayer(epoch);
+      } on _LifecycleCanceled {
+        rethrow; // 快滑换源 / 页面销毁的取消，不是媒体失败。
+      } catch (vpError) {
+        // video_player 失败 → 当次会话内用 IJK 软解兜底重试（不落盘）。
+        _emit(FallbackTriggered(
+          FallbackReason.error,
+          errorCode: vpError.toString(),
+        ));
+        await _disposeCurrentBackend();
+        // IJK 兜底播的是默认线路。
+        await _initNativeAfterVpFailure(source.currentLine.source, epoch, vpError);
+        _activeLineId = source.defaultLineId;
+      }
+    } finally {
+      _candidateBringUps--;
     }
   }
 
@@ -463,7 +470,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final wasPlaying = value.isPlaying;
     final wasInPip = value.isInPictureInPicture;
     super.value = newValue;
-    if (_switchesInFlight == 0) {
+    if (_candidateBringUps == 0) {
       _stablePosition = newValue.position;
       _stablePlaying = newValue.isPlaying;
     }
@@ -500,7 +507,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       // 切换进行中，候选 backend 的 error 不进 value：切换失败要么回滚成功
       // （value 自然恢复），要么在 switchLine 的失败路径里显式落 error。
       // 否则上层会把"候选线路没起来"当成"正在播的线路挂了"去做自动容灾。
-      if (_switchesInFlight > 0 && v.phase == PlayerPhase.error) return;
+      if (_candidateBringUps > 0 && v.phase == PlayerPhase.error) return;
       // backend 不知道 platform-level PiP 状态，保留 controller 自己维护的
       // PiP state，否则会被 backend 推的默认 false 覆盖。
       value = v.copyWith(isInPictureInPicture: value.isInPictureInPicture);
@@ -627,7 +634,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final savedPos = _stablePosition;
     final wasPlaying = _stablePlaying;
 
-    _switchesInFlight++;
+    _candidateBringUps++;
     try {
       await _doSwitchTo(lineId, epoch,
           savedPos: savedPos, wasPlaying: wasPlaying);
@@ -661,7 +668,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       _emit(LineSwitchFailed(toId: lineId, error: e));
       rethrow;
     } finally {
-      _switchesInFlight--;
+      _candidateBringUps--;
     }
   }
 

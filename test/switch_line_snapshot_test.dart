@@ -172,4 +172,68 @@ void main() {
       await ctrl.dispose();
     });
   });
+
+  group('initialize：候选遍历期间候选的 error 不进 value', () {
+    test('默认线路候选推出 error 后失败、备线路成功：全程 value 不出现 error，最终 ready',
+        () async {
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) {
+          if (ds.uri != srcA.uri) {
+            return FakePlayerBackend(kind: PlayerBackendKind.videoPlayer);
+          }
+          late FakePlayerBackend a;
+          a = FakePlayerBackend(
+            kind: PlayerBackendKind.videoPlayer,
+            initBlock: () async {
+              a.emitValue(errorValue()); // vp 的 VideoError 会先推 error value
+              throw StateError('MediaCodecVideoRenderer error');
+            },
+          );
+          return a;
+        },
+      );
+      final ctrl = NiumaPlayerController(
+        threeLines(),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      final phases = <PlayerPhase>[];
+      ctrl.addListener(() => phases.add(ctrl.value.phase));
+
+      await ctrl.initialize();
+
+      expect(phases, isNot(contains(PlayerPhase.error)),
+          reason: '候选 a 的 error 在遍历期间不该进 value——UI 会先闪错误层再"自愈"');
+      expect(ctrl.value.phase, PlayerPhase.ready);
+      expect(ctrl.activeLineId, 'b');
+      await ctrl.dispose();
+    });
+
+    test('全部候选失败：initialize 抛出且 value 落到 error', () async {
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) {
+          late FakePlayerBackend b;
+          b = FakePlayerBackend(
+            kind: PlayerBackendKind.videoPlayer,
+            initBlock: () async {
+              b.emitValue(errorValue());
+              throw StateError('down');
+            },
+          );
+          return b;
+        },
+      );
+      final ctrl = NiumaPlayerController(
+        threeLines(),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      await expectLater(ctrl.initialize(), throwsStateError);
+      expect(ctrl.value.phase, PlayerPhase.error);
+      expect(ctrl.value.error, isNotNull);
+      await ctrl.dispose();
+    });
+  });
 }

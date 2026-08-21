@@ -56,7 +56,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   （"切换失败 = 什么都没发生"，失败由 `LineSwitchFailed` 通知）；禁用回滚或回滚
   也失败时才显式把 `value` 落到 error（此前这条路径 `value` 会一直停在
   `playing`）；`switchLine` 的位置 / 播放快照改取最近一次稳定状态，并发切换时
-  不受候选半成品影响。新增 `test/switch_line_snapshot_test.dart`。
+  不受候选半成品影响。同一规则也覆盖 `initialize()` / `load()` 的候选遍历
+  （多线路 failover、IJK 兜底）：此前默认线路候选失败、下一条还在加载的窗口里
+  `value` 已是 error，UI 会先闪错误层再"自愈"（网络慢时在模拟器上复现）。
+  新增 `test/switch_line_snapshot_test.dart`。
 - **手势亮度 / 音量基准值读回期间松手会抛 `Null check operator`**：
   `onPanEnd()` 清掉 `_lockedKind` 后，异步读回的 `onPanUpdate` 续体仍
   `_lockedKind!`。现在按手势序号校验，已结束 / 已换手势的读数直接丢弃——
