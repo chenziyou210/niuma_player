@@ -129,6 +129,30 @@ void main() {
       await c.dispose();
     });
 
+    test('PipStartFailed（iOS 启动失败 / 等 possible 超时）→ isInPip 回 false、不暂停、事件透传',
+        () async {
+      final backend = _PipEmittingFakeBackend();
+      final c = _makeController(backend);
+      await c.initialize();
+      backend.simulateValue(backend.value.copyWith(phase: PlayerPhase.playing));
+      // enterPictureInPicture 会先乐观置 true；这里直接模拟那个状态。
+      c.value = c.value.copyWith(isInPictureInPicture: true);
+      final events = <NiumaPlayerEvent>[];
+      final sub = c.events.listen(events.add);
+
+      backend.emit(const PipStartFailed(reason: 'AVKit: not possible'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(c.value.isInPictureInPicture, isFalse,
+          reason: 'PiP 根本没起来，乐观置位必须回滚，否则控件一直藏着');
+      expect(backend.pauseCalled, 0,
+          reason: '这不是"退出 PiP"，不能触发退出 PiP 的默认暂停');
+      expect(events.whereType<PipStartFailed>().single.reason,
+          'AVKit: not possible');
+      await sub.cancel();
+      await c.dispose();
+    });
+
     test('PipRemoteAction(playPauseToggle) playing → 调 pause', () async {
       final backend = _PipEmittingFakeBackend();
       final c = _makeController(backend);

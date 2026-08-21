@@ -50,6 +50,9 @@ StreamSubscription<dynamic> subscribePipEvents(
           add(const PipModeChanged(isInPip: true));
         case 'pipStopped':
           add(const PipModeChanged(isInPip: false));
+        case 'pipFailed':
+          final reason = data['reason'];
+          add(PipStartFailed(reason: reason is String ? reason : null));
         case 'playPauseToggle':
           add(const PipRemoteAction(action: 'playPauseToggle'));
       }

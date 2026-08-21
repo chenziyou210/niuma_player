@@ -33,7 +33,8 @@ export 'src/domain/player_state.dart'
         LineSwitched,
         LineSwitchFailed,
         PipModeChanged,
-        PipRemoteAction;
+        PipRemoteAction,
+        PipStartFailed;
 export 'src/player/niuma_player_controller.dart'
     show NiumaPlayerController;
 export 'src/player/niuma_player_options.dart' show NiumaPlayerOptions;

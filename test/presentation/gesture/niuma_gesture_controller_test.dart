@@ -49,8 +49,20 @@ class _RecBackend extends PlayerBackend {
   Future<void> setVolume(double v) async {}
   @override
   Future<void> setLooping(bool looping) async {}
+  /// 每次 [getBrightness] 调用登记一个 gate；非空时要等测试放行才返回，
+  /// 用来模拟 method channel 读亮度的异步窗口。
+  final List<Completer<void>> brightnessGates = <Completer<void>>[];
+  bool gateBrightness = false;
+
   @override
-  Future<double> getBrightness() async => brightness;
+  Future<double> getBrightness() async {
+    if (gateBrightness) {
+      final gate = Completer<void>();
+      brightnessGates.add(gate);
+      await gate.future;
+    }
+    return brightness;
+  }
   @override
   Future<bool> setBrightness(double v) async {
     brightnessSets.add(v);
@@ -174,6 +186,55 @@ void main() {
     );
     g.onDoubleTap();
     expect(g.feedback.value, isNull);
+    await controller.dispose();
+  });
+
+  test('亮度基准还在异步读取时松手：迟到的读数不抛 null 断言、不设亮度、不弹 HUD',
+      () async {
+    final (controller, backend, g) = await build();
+    backend.gateBrightness = true;
+    g.onPanStart(const Offset(50, 150));
+    final update = g.onPanUpdate(const Offset(50, 30), size); // 卡在 getBrightness
+    g.onPanEnd(); // 用户松手
+    backend.brightnessGates.single.complete();
+
+    await update; // 此前在这里抛 "Null check operator used on a null value"
+    expect(backend.brightnessSets, isEmpty,
+        reason: '手势已结束，迟到的读数不该再去动系统亮度');
+    expect(g.feedback.value, isNull);
+    await controller.dispose();
+  });
+
+  test('上一手势迟到的亮度读数不覆盖新手势的基准值', () async {
+    final (controller, backend, g) = await build();
+    backend.gateBrightness = true;
+
+    // 手势 1：读数挂起，用户松手。
+    g.onPanStart(const Offset(50, 150));
+    final update1 = g.onPanUpdate(const Offset(50, 30), size);
+    g.onPanEnd();
+
+    // 手势 2：重新起手，读数也挂起。
+    g.onPanStart(const Offset(50, 150));
+    final update2 = g.onPanUpdate(const Offset(50, 30), size);
+    expect(backend.brightnessGates.length, 2);
+
+    // 手势 2 的读数先回来：基准 0.3。
+    backend.brightness = 0.3;
+    backend.brightnessGates[1].complete();
+    await update2;
+    // 手势 1 的读数后回来，且系统亮度此时已是 0.9——它属于已结束的手势，必须被丢弃。
+    backend.brightness = 0.9;
+    backend.brightnessGates[0].complete();
+    await update1;
+
+    // 手势 2 继续：dy=0 → 设置值应等于手势 2 的基准 0.3，而不是 0.9。
+    backend.brightnessSets.clear();
+    backend.gateBrightness = false;
+    await Future<void>.delayed(const Duration(milliseconds: 60)); // 过节流窗口
+    await g.onPanUpdate(const Offset(50, 150), size);
+    expect(backend.brightnessSets.last, closeTo(0.3, 0.001),
+        reason: '基准被旧手势迟到的 0.9 覆盖了');
     await controller.dispose();
   });
 }

@@ -24,8 +24,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   7.1.1，现统一为自编 FFmpeg 8.1 `0.8.8-ff8.1-static-20260727`——目前唯一能
   正确播 H.265 fMP4 分片 HLS 的产物，并明确不要换回 GSY / FFmpeg 4.x。
 
+### Added
+
+- `PipStartFailed(reason)` 事件：iOS PiP 启动失败（AVKit `failedToStart` 或
+  等 `isPictureInPicturePossible` 5s 超时）时原生侧推送，controller 据此把
+  `enterPictureInPicture()` 乐观置位的 `isInPictureInPicture` 翻回 false
+  （不触发退出 PiP 的默认暂停）。此前失败只在原生侧 teardown、不通知 Dart，
+  `isInPip` 会一直卡 true 直到下次回前台。
+
 ### Fixed
 
+- **手势亮度 / 音量基准值读回期间松手会抛 `Null check operator`**：
+  `onPanEnd()` 清掉 `_lockedKind` 后，异步读回的 `onPanUpdate` 续体仍
+  `_lockedKind!`。现在按手势序号校验，已结束 / 已换手势的读数直接丢弃——
+  也不会再用上一手势迟到的读数覆盖新手势的基准。
 - **Controller 并发操作竞态：`load()` / `switchLine()` 现在是"最后一次说了算"。**
   此前代际守卫只在 bring-up 的第一个 await 之前检查一次，且 `switchLine()`
   根本不递增代际；`load()` 打断卡在 middleware（签名 URL 等）里的

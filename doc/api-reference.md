@@ -205,6 +205,7 @@ class PlayerError {
 | `LineSwitched(toId)` | 切换成功 |
 | `LineSwitchFailed(toId, error)` | 切换失败（即使 rollback 成功也 emit，供业务上报） |
 | `PipModeChanged(isInPip)` | 进入 / 退出 PiP（原生侧推送） |
+| `PipStartFailed(reason)` | PiP 启动失败（iOS `failedToStart` / 等待就绪超时）；`isInPictureInPicture` 已回滚为 false，不触发退出 PiP 的默认暂停 |
 | `PipRemoteAction(action)` | PiP 小窗按钮事件 |
 
 ---

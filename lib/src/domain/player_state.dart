@@ -353,6 +353,17 @@ final class PipModeChanged extends NiumaPlayerEvent {
   final bool isInPip;
 }
 
+/// PiP 启动失败事件（iOS：AVKit `failedToStart` 回调，或等
+/// `isPictureInPicturePossible` 超时）。controller 收到后把乐观置位的
+/// `isInPictureInPicture` 翻回 false；这不是"退出 PiP"，不触发退出时的默认暂停。
+final class PipStartFailed extends NiumaPlayerEvent {
+  /// 构造一个事件。
+  const PipStartFailed({this.reason});
+
+  /// 原生侧给出的失败原因（可能为空）。
+  final String? reason;
+}
+
 /// PiP 窗内 RemoteAction 触发事件（Android only——iOS stock 控件由
 /// AVPlayer 自己处理，不走此事件）。
 final class PipRemoteAction extends NiumaPlayerEvent {

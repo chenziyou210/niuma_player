@@ -40,6 +40,12 @@ class NiumaGestureController {
   /// 水平 seek 的最新目标；onPanEnd 直接提交它，不从 HUD 进度反算。
   Duration? _pendingSeekTarget;
 
+  /// 手势序号：onPanStart / onPanEnd 递增。亮度 / 音量基准值经 method
+  /// channel 异步读回，读回期间用户可能已松手甚至开始下一次手势——序号
+  /// 不符的读数直接丢弃，既不能 `_lockedKind!`（已被 onPanEnd 清空）也不能
+  /// 覆盖新手势的基准。
+  int _gestureSeq = 0;
+
   double? _originalSpeed;
   Timer? _hideTimer;
   double? _initialBrightness;
@@ -122,16 +128,17 @@ class NiumaGestureController {
     _origValue = 0.0;
     _origValueReady = false;
     _pendingSeekTarget = null;
+    _gestureSeq++;
   }
 
-  Future<void> _ensureOrigValue(GestureKind kind) async {
+  /// 读当前系统亮度 / 音量作为本次手势的基准；不直接写字段，由调用方确认
+  /// 手势仍然有效后再写。
+  Future<double> _readOrigValue(GestureKind kind) async {
     final backend = player.backend;
-    if (backend == null) return;
-    if (kind == GestureKind.brightness) {
-      _origValue = await backend.getBrightness();
-    } else if (kind == GestureKind.volume) {
-      _origValue = await backend.getSystemVolume();
-    }
+    if (backend == null) return 0.0;
+    if (kind == GestureKind.brightness) return backend.getBrightness();
+    if (kind == GestureKind.volume) return backend.getSystemVolume();
+    return 0.0;
   }
 
   /// pan 更新 → 首次过阈值时锁定方向（水平 seek / 左亮度 / 右音量），
@@ -152,11 +159,20 @@ class NiumaGestureController {
         _lockedKind = null;
         return;
       }
-      await _ensureOrigValue(_lockedKind!);
+      final kind = _lockedKind!;
+      final seq = _gestureSeq;
+      final orig = await _readOrigValue(kind);
+      // 读回期间松手 / 换了手势：这份读数作废，什么都别碰。
+      if (seq != _gestureSeq || _lockedKind != kind) return;
+      _origValue = orig;
       _origValueReady = true;
     }
 
-    switch (_lockedKind!) {
+    // onPanEnd 可能在上面的 await 期间清掉它；到这里一定非空（要么没经过
+    // await，要么刚通过序号校验）。
+    final locked = _lockedKind;
+    if (locked == null) return;
+    switch (locked) {
       case GestureKind.horizontalSeek:
         final duration = player.value.duration;
         if (duration == Duration.zero) return;
@@ -222,6 +238,7 @@ class NiumaGestureController {
     }
     _pendingSeekTarget = null;
     _lockedKind = null;
+    _gestureSeq++;
     _scheduleHide();
   }
 

@@ -219,6 +219,10 @@ import UIKit
                 if self.pipPossibleObservation != nil {
                     Self.log("等 isPictureInPicturePossible 超时（5s），放弃")
                     self.teardownPipState()
+                    // handleEnter 已经乐观返回 true，Dart 侧 isInPip=true 只能靠
+                    // 这个事件翻回来——否则控件一直藏着直到下次回前台。
+                    self.eventSink?(["event": "pipFailed",
+                                     "reason": "timeout waiting for isPictureInPicturePossible"])
                 }
             }
             pipReadyTimeout = timeout
@@ -396,6 +400,7 @@ extension NiumaPipPlugin: AVPictureInPictureControllerDelegate {
     ) {
         Self.log("delegate: failedToStart \(error)")
         teardownPipState()
+        eventSink?(["event": "pipFailed", "reason": error.localizedDescription])
     }
 
     /// user 从 PiP 小窗"返回 app"时触发；缺这个 method 会打乱部分 iOS 版本

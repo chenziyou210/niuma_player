@@ -489,6 +489,14 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       if (_disposed) return;
       // FallbackTriggered 由 controller 自己发权威版本，丢掉 backend 级的避免重复。
       if (e is FallbackTriggered) return;
+      if (e is PipStartFailed) {
+        // 乐观置位回滚；没进过 PiP，不走"退出 PiP 默认暂停"。
+        if (value.isInPictureInPicture) {
+          value = value.copyWith(isInPictureInPicture: false);
+        }
+        if (!_eventController.isClosed) _eventController.add(e);
+        return;
+      }
       if (e is PipModeChanged) {
         value = value.copyWith(isInPictureInPicture: e.isInPip);
         // 退出 PiP 默认暂停（与 B 站 / YouTube mobile 一致）；业务想续播
