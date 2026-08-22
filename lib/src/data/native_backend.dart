@@ -126,7 +126,7 @@ class NativeBackend extends PlayerBackend {
   }
 
   void _startPipEventListening() {
-    _pipEventSub = subscribePipEvents(_eventController.add);
+    _pipEventReg = subscribePipEvents(_eventController.add, owner: this);
   }
 
   void _bumpPrepareWatchdog() {
@@ -362,8 +362,8 @@ class NativeBackend extends PlayerBackend {
 
   static const MethodChannel _pipChannel = MethodChannel('niuma_player/pip');
 
-  /// 监听共享 [pipEventBus]——避开 EventChannel 单 listener race。
-  StreamSubscription<dynamic>? _pipEventSub;
+  /// 共享 PiP bus 的注册句柄——避开 EventChannel 单 listener race。
+  PipEventRegistration? _pipEventReg;
 
   /// 进入 PiP（Android）。失败 / 不支持返 false 不抛。
   @override
@@ -373,6 +373,8 @@ class NativeBackend extends PlayerBackend {
     bool unsafeAutoBackground = false,
   }) async {
     // unsafeAutoBackground 是 iOS-only hack，Android 原生 PiP 立即生效，忽略。
+    // 乐观 claim：pipStarted 可能先于 method result 到达，归属必须已就位。
+    claimPipOwnership(this);
     try {
       final result = await _pipChannel.invokeMethod<bool>(
         'enterPictureInPicture',
@@ -381,8 +383,11 @@ class NativeBackend extends PlayerBackend {
           'aspectDen': aspectDen,
         },
       );
-      return result ?? false;
+      final ok = result ?? false;
+      if (!ok) releasePipOwnership(this);
+      return ok;
     } on PlatformException {
+      releasePipOwnership(this);
       return false;
     }
   }
@@ -441,8 +446,8 @@ class NativeBackend extends PlayerBackend {
     _prepareWatchdog?.cancel();
     _prepareWatchdog = null;
     await _eventSub?.cancel();
-    await _pipEventSub?.cancel();
-    _pipEventSub = null;
+    _pipEventReg?.cancel();
+    _pipEventReg = null;
     final tid = _textureId;
     if (tid != null) {
       try {

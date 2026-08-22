@@ -116,16 +116,39 @@ void main() {
       final backend = _PipEmittingFakeBackend();
       final c = _makeController(backend);
       await c.initialize();
-      // 模拟在 PiP 中正在播
-      backend.simulateValue(c.value.copyWith(
-        phase: PlayerPhase.playing,
-        isInPictureInPicture: true,
-      ));
+      // 模拟在 PiP 中正在播。PiP 状态由 controller 自己维护（backend 推的
+      // value 会被 copyWith 保留 controller 侧的 PiP 位），所以直接置 value。
+      backend.simulateValue(c.value.copyWith(phase: PlayerPhase.playing));
+      c.value = c.value.copyWith(isInPictureInPicture: true);
       // 用户按 X 关闭 PiP
       backend.emit(const PipModeChanged(isInPip: false));
       await Future<void>.delayed(Duration.zero);
       expect(c.value.isInPictureInPicture, isFalse);
       expect(backend.pauseCalled, 1, reason: '退出 PiP 应自动暂停');
+      await c.dispose();
+    });
+
+    test('本实例从未进过 PiP 时收到 PipModeChanged(false)：不暂停、不透传（多实例不串台）',
+        () async {
+      final backend = _PipEmittingFakeBackend();
+      final c = _makeController(backend);
+      await c.initialize();
+      backend.simulateValue(c.value.copyWith(phase: PlayerPhase.playing));
+      expect(c.value.isInPictureInPicture, isFalse);
+      final events = <NiumaPlayerEvent>[];
+      final sub = c.events.listen(events.add);
+
+      // 别的播放器退出 PiP（无 owner 的广播兜底路径把事件也发给了本实例）。
+      backend.emit(const PipModeChanged(isInPip: false));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(backend.pauseCalled, 0,
+          reason: '不是本实例的 PiP 会话，正在播的实例不得被误暂停');
+      expect(c.value.phase, PlayerPhase.playing);
+      expect(events.whereType<PipModeChanged>(), isEmpty,
+          reason: '不属于本实例的退出事件不透传，避免上层误响应');
+
+      await sub.cancel();
       await c.dispose();
     });
 

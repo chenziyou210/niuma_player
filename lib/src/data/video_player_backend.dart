@@ -34,7 +34,7 @@ class VideoPlayerBackend extends PlayerBackend {
       MethodChannel('niuma_player/system');
   static const MethodChannel _pipChannel = MethodChannel('niuma_player/pip');
 
-  StreamSubscription<dynamic>? _pipEventSub;
+  PipEventRegistration? _pipEventReg;
 
   /// 底层 controller。对外暴露以便 [NiumaPlayerView] 把它交给
   /// `package:video_player` 的 `VideoPlayer` widget。
@@ -91,7 +91,7 @@ class VideoPlayerBackend extends PlayerBackend {
   }
 
   void _startPipEventListening() {
-    _pipEventSub = subscribePipEvents(_eventController.add);
+    _pipEventReg = subscribePipEvents(_eventController.add, owner: this);
   }
 
   /// 推导 [PlayerPhase]，优先级
@@ -274,6 +274,9 @@ class VideoPlayerBackend extends PlayerBackend {
     final tid = _inner.playerId;
     // kUninitializedPlayerId == -1；未初始化时不能 PiP。
     if (tid < 0) return false;
+    // 乐观 claim：pipStarted 可能先于 method result 到达，归属必须已就位；
+    // 失败则回滚，别把无主会话的广播模式挡住。
+    claimPipOwnership(this);
     try {
       final result = await _pipChannel.invokeMethod<bool>(
         'enterPictureInPicture',
@@ -284,8 +287,11 @@ class VideoPlayerBackend extends PlayerBackend {
           'unsafeAutoBackground': unsafeAutoBackground,
         },
       );
-      return result ?? false;
+      final ok = result ?? false;
+      if (!ok) releasePipOwnership(this);
+      return ok;
     } on PlatformException catch (e, st) {
+      releasePipOwnership(this);
       // 不抛——失败默默返 false，让上层决定 UX。
       assert(() {
         // ignore: avoid_print
@@ -332,9 +338,10 @@ class VideoPlayerBackend extends PlayerBackend {
     if (_disposed) return;
     _disposed = true;
     _inner.removeListener(_onInnerChanged);
-    // cancel 的是 bus 的 sub-listener，不触发 native EventChannel cancel。
-    await _pipEventSub?.cancel();
-    _pipEventSub = null;
+    // 反注册的是 bus 的 Dart 侧回调（连带释放归属），不触发 native
+    // EventChannel cancel。
+    _pipEventReg?.cancel();
+    _pipEventReg = null;
     await _inner.dispose();
     await _valueController.close();
     await _eventController.close();
