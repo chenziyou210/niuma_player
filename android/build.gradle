@@ -63,5 +63,9 @@ android {
         // buffering，别换回去。版本事实源 scripts/compile/VERSIONS.lock，
         // 根因与实测 doc/ijk-fmp4-hls.md。
         implementation("tv.danmaku.ijk:ijkplayer:0.8.8-ff8.1-static-20260727@aar")
+        // ContextCompat.registerReceiver：PiP 遥控 receiver 的 NOT_EXPORTED
+        // 保护需要 androidx.core 在 API ≤32 上背书（用应用私有签名权限），
+        // 裸 registerReceiver 在旧版本上隐式导出、可被任意应用触发。
+        implementation("androidx.core:core:1.13.1")
     }
 }

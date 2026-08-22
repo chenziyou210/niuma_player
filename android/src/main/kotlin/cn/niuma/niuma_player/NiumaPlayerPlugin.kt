@@ -1,5 +1,6 @@
 package cn.niuma.niuma_player
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.PendingIntent
@@ -14,6 +15,8 @@ import android.media.AudioManager
 import android.os.Build
 import android.util.Log
 import android.util.Rational
+import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -257,6 +260,9 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         result.success(false)
     }
 
+    // FEATURE_PICTURE_IN_PICTURE 是编译期内联常量（API 24 引入），低版本
+    // 运行时拿到的是值本身，不会缺符号——lint 的 InlinedApi 在此可安全豁免。
+    @SuppressLint("InlinedApi")
     private fun handleQueryPipSupport(result: Result) {
         val activity = activityBinding?.activity
         if (activity == null) {
@@ -273,6 +279,9 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         result.success(sdkOk)
     }
 
+    // RemoteAction / Icon.createWithResource 需 API 26/23；所有调用方都有
+    // SDK_INT >= O 运行时守卫，注解让 lint 的 NewApi 理解这一点。
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun createPlayPauseRemoteAction(
         ctx: Context,
         isPlaying: Boolean,
@@ -334,11 +343,15 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         if (pipReceiver != null) return
         val receiver = PipBroadcastReceiver()
         val filter = IntentFilter(ACTION_PIP_PLAY_PAUSE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            activity.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            activity.registerReceiver(receiver, filter)
-        }
+        // ContextCompat 在 API 33+ 用 RECEIVER_NOT_EXPORTED flag，在更低版本
+        // 用应用私有签名权限背书——否则 API ≤32 上动态 receiver 隐式导出，
+        // 任何应用广播 ACTION_PIP_PLAY_PAUSE 都能控制播放。
+        ContextCompat.registerReceiver(
+            activity,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         pipReceiver = receiver
     }
 
