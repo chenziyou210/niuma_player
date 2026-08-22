@@ -180,7 +180,9 @@ void main() {
       final backend = _PipEmittingFakeBackend();
       final c = _makeController(backend);
       await c.initialize();
+      // 遥控来自 PiP 窗，实例必然在 PiP 中（PiP 位由 controller 维护）。
       backend.simulateValue(c.value.copyWith(phase: PlayerPhase.playing));
+      c.value = c.value.copyWith(isInPictureInPicture: true);
       backend.emit(const PipRemoteAction(action: 'playPauseToggle'));
       await Future<void>.delayed(Duration.zero);
       expect(backend.pauseCalled, 1);
@@ -192,9 +194,33 @@ void main() {
       final c = _makeController(backend);
       await c.initialize();
       backend.simulateValue(c.value.copyWith(phase: PlayerPhase.paused));
+      c.value = c.value.copyWith(isInPictureInPicture: true);
       backend.emit(const PipRemoteAction(action: 'playPauseToggle'));
       await Future<void>.delayed(Duration.zero);
       expect(backend.playCalled, 1);
+      await c.dispose();
+    });
+
+    test('本实例不在 PiP 中收到 PipRemoteAction：不播放/暂停、不透传（多实例不串台）',
+        () async {
+      final backend = _PipEmittingFakeBackend();
+      final c = _makeController(backend);
+      await c.initialize();
+      backend.simulateValue(c.value.copyWith(phase: PlayerPhase.playing));
+      expect(c.value.isInPictureInPicture, isFalse);
+      final events = <NiumaPlayerEvent>[];
+      final sub = c.events.listen(events.add);
+
+      // 别的播放器 PiP 窗的遥控（无 owner 广播兜底 / owner 已 dispose 的迟到事件）。
+      backend.emit(const PipRemoteAction(action: 'playPauseToggle'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(backend.pauseCalled, 0,
+          reason: '不是本实例的 PiP 遥控，不得让所有实例一起播放/暂停');
+      expect(backend.playCalled, 0);
+      expect(events.whereType<PipRemoteAction>(), isEmpty);
+
+      await sub.cancel();
       await c.dispose();
     });
   });
