@@ -133,7 +133,11 @@ class NiumaPlayerPool {
       try {
         await existing.pending;
       } catch (_) {
-        await _remove(key);
+        // 只删自己等的那个 entry：await 期间同 key 可能已换成新 entry（ABA），
+        // 删除被跳过时要自行归还本次 acquire 的持有计数（正常删除会连
+        // _holds 一起清）。
+        _unhold(key);
+        await _remove(key, expected: existing);
         rethrow;
       }
       return existing.controller;
@@ -157,7 +161,8 @@ class NiumaPlayerPool {
       entry.ready = true;
       entry.pending = null;
     } catch (_) {
-      await _remove(key);
+      _unhold(key);
+      await _remove(key, expected: entry);
       rethrow;
     }
     return entry.controller;
@@ -185,7 +190,9 @@ class NiumaPlayerPool {
       entry.ready = true;
       entry.pending = null;
     } catch (_) {
-      await _remove(key);
+      // 只删自己建的那个 entry：本 preload 被 evict 淘汰后同 key 可能已有
+      // 新 entry（ABA），迟到的失败回调不得把它删掉。
+      await _remove(key, expected: entry);
       rethrow;
     }
   }
@@ -243,6 +250,9 @@ class NiumaPlayerPool {
     int? oldestSeq;
     for (final e in _entries.entries) {
       if (_isHeld(e.key)) continue;
+      // init 还在途的不当 victim：中途 dispose 白干一次拉起，其失败回调还会
+      // 经 _remove 撞上同 key 的新 entry（ABA）。acquire 侧有短暂超容兜底。
+      if (e.value.pending != null) continue;
       if (oldestSeq == null || e.value.accessSeq < oldestSeq) {
         oldest = e.key;
         oldestSeq = e.value.accessSeq;
@@ -251,10 +261,16 @@ class NiumaPlayerPool {
     return oldest;
   }
 
-  Future<void> _remove(String key) async {
-    final entry = _entries.remove(key);
+  /// 移除并 dispose [key] 的条目。[expected] 非空时做身份校验：条目已被换成
+  /// 新实例（旧异步任务迟到的失败回调，ABA 场景）则什么都不动——否则会误删
+  /// 并 dispose 别人正在用的新 entry，还连带抹掉其持有计数。
+  Future<void> _remove(String key, {_Entry? expected}) async {
+    final entry = _entries[key];
+    if (entry == null) return;
+    if (expected != null && !identical(entry, expected)) return;
+    _entries.remove(key);
     _holds.remove(key);
-    await entry?.controller.dispose();
+    await entry.controller.dispose();
   }
 
   /// 周期性回收超过 staleDuration 未访问且非 active 的条目。

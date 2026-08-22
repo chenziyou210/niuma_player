@@ -578,4 +578,74 @@ void main() {
       expect(pool.holds('https://x/a.mp4'), isFalse);
     });
   });
+
+  group('同 key 换代（ABA）', () {
+    test('preload 被 evict 后同 key 已有新 entry：迟到的失败回调不得删掉新 entry',
+        () async {
+      final initGate = Completer<void>();
+      var created = 0;
+      final bf = _FakeFactory(makeBackend: () {
+        final index = created++;
+        // 只有第一只（旧 preload 的）backend 被卡住。
+        return _FakeBackend(initBlock: index == 0 ? () => initGate.future : null);
+      });
+      final pool = NiumaPlayerPool(controllerFactory: factoryWith(bf));
+      const key = 'https://x/a.mp4';
+
+      // 旧 preload 卡在 init 里。
+      final stalePreload = pool.preload(_src(key));
+      final stalePreloadOutcome = expectLater(stalePreload, throwsStateError);
+      await Future<void>.delayed(Duration.zero);
+
+      // 主动 evict 淘汰它（controller 被 dispose，init 链之后才会失败）。
+      await pool.evict(key);
+
+      // 同 key 立刻建了新 entry 并就绪——这是用户正在用的实例。
+      final fresh = await pool.acquire(_src(key));
+
+      // 旧 preload 的 init 此刻才 settle → 其失败回调不得动同 key 的新 entry。
+      initGate.complete();
+      await stalePreloadOutcome;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(pool.holds(key), isTrue,
+          reason: '迟到的失败回调删掉的必须只能是自己那个 entry');
+      expect(bf.created[1].disposed, isFalse,
+          reason: '新 entry 的 backend 不得被旧回调误 dispose');
+      expect(identical(await pool.acquire(_src(key)), fresh), isTrue,
+          reason: '新 entry 仍在池中命中');
+
+      await pool.dispose();
+    });
+
+    test('init 还在途的 preload 不当 LRU victim；无可回收 victim 时 preload 跳过',
+        () async {
+      final initGate = Completer<void>();
+      var created = 0;
+      final bf = _FakeFactory(makeBackend: () {
+        final index = created++;
+        return _FakeBackend(initBlock: index == 0 ? () => initGate.future : null);
+      });
+      final pool = NiumaPlayerPool(
+        controllerFactory: factoryWith(bf),
+        capacity: 1,
+      );
+
+      final preloadA = pool.preload(_src('https://x/a.mp4'));
+      await Future<void>.delayed(Duration.zero);
+
+      // 容量已满、唯一条目还在 init：preload(B) 不得把它挤掉，应静默跳过。
+      await pool.preload(_src('https://x/b.mp4'));
+      expect(pool.holds('https://x/b.mp4'), isFalse,
+          reason: '无可回收 victim 时 preload 跳过');
+      expect(bf.created.single.disposed, isFalse,
+          reason: 'init 中的 preload 不得被 evict 打断（白干一次拉起还触发 ABA）');
+
+      initGate.complete();
+      await preloadA;
+      expect(pool.holds('https://x/a.mp4'), isTrue);
+
+      await pool.dispose();
+    });
+  });
 }
