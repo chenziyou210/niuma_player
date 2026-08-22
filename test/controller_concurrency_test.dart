@@ -265,4 +265,192 @@ void main() {
       await ctrl.dispose();
     });
   });
+
+  group('过期链醒来后的收尾不得伤及新链', () {
+    test(
+        'Android 单线路：initialize 被 load 压倒后才失败（不可重试）——'
+        '旧链不得 dispose 新链的 backend、不得兜底 IJK、不得上报 FallbackTriggered',
+        () async {
+      final vpGateA = Completer<void>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          initBlock: ds.uri == srcA.uri ? () => vpGateA.future : null,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(), // 非 iOS 非 web = Android 路径
+        backendFactory: factory,
+      );
+      final events = <NiumaPlayerEvent>[];
+      final sub = ctrl.events.listen(events.add);
+
+      final init = ctrl.initialize();
+      final initOutcome = expectLater(init, _superseded);
+      await _settle();
+
+      // 新链：load(B) 压倒旧链并正常起来。
+      await ctrl.load(NiumaMediaSource.single(srcB));
+      final backendB = ctrl.backend! as FakePlayerBackend;
+      expect(backendB.source?.uri, srcB.uri);
+
+      // 旧链的 vp 初始化此刻才失败（真实场景：它的 backend 已被压倒者
+      // 销毁，抛的是普通异常而非生命周期取消，且不可重试）。
+      vpGateA.completeError(StateError('vp init failed'));
+      await initOutcome;
+      await _settle();
+
+      expect(backendB.disposed, isFalse,
+          reason: '过期链的失败收尾不得 dispose 新链刚挂上的 backend');
+      expect(identical(ctrl.backend, backendB), isTrue,
+          reason: '_backend 必须仍指向新链的 backend');
+      expect(factory.nativePlayers, isEmpty,
+          reason: '过期链不得再为旧源拉起 IJK 兜底');
+      expect(events.whereType<FallbackTriggered>(), isEmpty,
+          reason: '过期链的失败不是本次播放的失败');
+      expect(ctrl.value.phase, isNot(PlayerPhase.error));
+
+      await sub.cancel();
+      await ctrl.dispose();
+    });
+
+    test('卡死在 middleware 的旧链不得吞掉新链 backend 的 error（按代际过滤候选）',
+        () async {
+      final gate = _GateMiddleware()..hold(srcA.uri);
+      final factory = FakeBackendFactory();
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        middlewares: [gate],
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+
+      final init = ctrl.initialize();
+      final initOutcome = expectLater(init, _superseded);
+      await _settle();
+
+      // 新链正常起来；旧链仍卡在 middleware(A)，其候选登记不会注销。
+      await ctrl.load(NiumaMediaSource.single(srcB));
+      final backendB = ctrl.backend! as FakePlayerBackend;
+
+      // 正在播的新 backend 挂了：error 必须进 value，不能被旧链的
+      // "候选拉起在途"误伤吞掉。
+      backendB.emitValue(backendB.value.copyWith(
+        phase: PlayerPhase.error,
+        error: PlayerError(
+          category: PlayerErrorCategory.network,
+          message: 'stream died',
+        ),
+      ));
+      await _settle();
+      expect(ctrl.value.phase, PlayerPhase.error,
+          reason: '稳定播放期的 error 不得因过期候选在途而被抑制');
+      expect(ctrl.value.error?.message, 'stream died');
+
+      gate.release(srcA.uri);
+      await initOutcome;
+      await ctrl.dispose();
+    });
+
+    test(
+        'web 原地换源：A 已进 backend.load、B 压倒后 A 才完成——'
+        'A 必须以 superseded 结束，不得宣布成功', () async {
+      final gate = _GateMiddleware()..hold(srcB.uri);
+      final loadGateA = Completer<void>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (_) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          supportsSourceSwap: true,
+          loadBlock: (ds) async {
+            if (ds.uri == srcA.uri) await loadGateA.future;
+          },
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcC),
+        middlewares: [gate],
+        platform: FakePlatformBridge(isWeb: true),
+        backendFactory: factory,
+      );
+      await ctrl.initialize();
+      final backend = ctrl.backend! as FakePlayerBackend;
+
+      // A 过了 middleware，进到 backend.load 里等着。
+      final loadA = ctrl.load(NiumaMediaSource.single(srcA));
+      final loadAOutcome = expectLater(loadA, _superseded);
+      await _settle();
+
+      // B 压倒 A 后卡在 middleware(B)——controller 已声明 source=B。
+      final loadB = ctrl.load(NiumaMediaSource.single(srcB));
+      await _settle();
+      expect(ctrl.source.currentLine.source.uri, srcB.uri);
+
+      // A 此刻才从 backend.load 回来：明明已被压倒，不得宣布成功。
+      loadGateA.complete();
+      await loadAOutcome;
+
+      gate.release(srcB.uri);
+      await loadB;
+      expect(backend.loadedSources.last.uri, srcB.uri,
+          reason: '最终喂给 backend 的必须是 B');
+
+      await ctrl.dispose();
+    });
+
+    test('switchLine 在"恢复播放"的 await 期间被压倒：不得事后补发 LineSwitched',
+        () async {
+      final playGateB = Completer<void>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          playBlock: ds.uri == srcB.uri ? () => playGateB.future : null,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.lines(
+          lines: [
+            MediaLine(id: 'a', label: 'A', source: srcA),
+            MediaLine(id: 'b', label: 'B', source: srcB),
+            MediaLine(id: 'c', label: 'C', source: srcC),
+          ],
+          defaultLineId: 'a',
+        ),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      await ctrl.initialize();
+      // 打上播放意图：切换成功后要续播，会走 _backend.play() 的 await。
+      final backendA = ctrl.backend! as FakePlayerBackend;
+      backendA.emitValue(backendA.value.copyWith(phase: PlayerPhase.playing));
+      final events = <NiumaPlayerEvent>[];
+      final sub = ctrl.events.listen(events.add);
+
+      // b 拉起成功，卡在恢复播放的 play() 里。
+      final toB = ctrl.switchLine('b');
+      final toBOutcome = expectLater(toB, _superseded);
+      await _settle();
+
+      // c 压倒 b 并完成。
+      await ctrl.switchLine('c');
+      expect(events.whereType<LineSwitched>().map((e) => e.toId).toList(),
+          ['c']);
+
+      // b 此刻才从 play() 回来：不得补一条 LineSwitched(b)。
+      playGateB.complete();
+      await toBOutcome;
+      await _settle();
+
+      expect(
+        events.whereType<LineSwitched>().map((e) => e.toId).toList(),
+        ['c'],
+        reason: '被压倒的切换不得在事后宣布成功',
+      );
+      expect(ctrl.activeLineId, 'c');
+
+      await sub.cancel();
+      await ctrl.dispose();
+    });
+  });
 }

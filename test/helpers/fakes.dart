@@ -12,6 +12,7 @@ class FakePlayerBackend extends PlayerBackend {
     this.source,
     this.supportsSourceSwap = false,
     this.loadBlock,
+    this.playBlock,
   });
 
   @override
@@ -35,6 +36,10 @@ class FakePlayerBackend extends PlayerBackend {
   /// If non-null, [load] awaits it before recording the new source —
   /// lets tests hold an in-place swap open to race another call into it.
   final Future<void> Function(NiumaDataSource source)? loadBlock;
+
+  /// If non-null, [play] awaits it first — lets tests hold the post-switch
+  /// "resume playback" step open to race another operation into it.
+  final Future<void> Function()? playBlock;
 
   /// Every source handed to [load], in call-completion order.
   final List<NiumaDataSource> loadedSources = <NiumaDataSource>[];
@@ -117,6 +122,7 @@ class FakePlayerBackend extends PlayerBackend {
 
   @override
   Future<void> play() async {
+    if (playBlock != null) await playBlock!();
     playCalls++;
   }
 

@@ -123,13 +123,22 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   String? _activeLineId;
 
-  /// 进行中的"候选拉起"数量：[switchLine]（并发时可能 >1）与 [initialize] /
-  /// [load] 的候选遍历（多线路 failover、IJK 兜底）。期间候选 backend 的
-  /// `phase=error` 不写进 [value]——候选失败不等于播放失败：切换失败会回滚
-  /// （由 [LineSwitchFailed] 通知），首播会试下一条线路 / IJK；只有最终失败
-  /// 才显式把 error 落到 [value]（[initialize] 的 onError、[switchLine] 的
-  /// 无法回滚路径）。期间 [value] 的变化也不更新稳定快照。
-  int _candidateBringUps = 0;
+  /// 有候选拉起在途的代际集合：[switchLine] 与 [initialize] / [load] 的候选
+  /// 遍历（多线路 failover、IJK 兜底）各自登记发起时的 epoch，结束（含失败）
+  /// 时注销。期间候选 backend 的 `phase=error` 不写进 [value]——候选失败不
+  /// 等于播放失败：切换失败会回滚（由 [LineSwitchFailed] 通知），首播会试
+  /// 下一条线路 / IJK；只有最终失败才显式把 error 落到 [value]（[initialize]
+  /// 的 onError、[switchLine] 的无法回滚路径）。期间 [value] 的变化也不更新
+  /// 稳定快照。
+  ///
+  /// 用 epoch 集合而非全局计数：全局计数在旧链卡死在 middleware / 平台
+  /// Future 里时永远不归零，会把**新链** backend 的真实 error 一并吞掉、
+  /// 稳定快照也永久冻结。error 抑制与快照冻结只认"当前代际是否有候选在途"
+  /// （[_candidateBringUpInFlight]），卡死的旧链登记的过期 epoch 不再影响新链。
+  final Set<int> _candidateEpochs = <int>{};
+
+  /// 当前代际是否有候选拉起在途。见 [_candidateEpochs]。
+  bool get _candidateBringUpInFlight => _candidateEpochs.contains(_epoch);
 
   /// 最近一次**稳定**的播放位置 / 播放意图（含 buffering）——只在没有候选
   /// 拉起进行中时随 [value] 更新。[switchLine] 的"切换前快照"取自这里，而不是当下的 [value]：并发
@@ -222,10 +231,16 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final initInFlight =
         _initCompleter != null && !_initCompleter!.isCompleted;
     if (backend != null && backend.supportsSourceSwap && !initInFlight) {
+      // middleware 计入 initTimeout 预算：卡死的 middleware 不能让 load 的
+      // future 永远悬着。
       final resolved =
-          await runSourceMiddlewares(newSource.currentLine.source, middlewares);
+          await runSourceMiddlewares(newSource.currentLine.source, middlewares)
+              .timeout(options.initTimeout);
       _ensureCurrent(epoch); // 过期的 load 不得把旧源喂给 backend 覆盖新源
       await backend.load(resolved).timeout(options.initTimeout);
+      // backend.load 的 await 期间被更晚的 load 压倒：本次调用必须按契约以
+      // StateError 结束，不能明明输了还宣布成功（backend 最终会被压倒者纠正）。
+      _ensureCurrent(epoch);
     } else {
       // 先作废旧 future：它已被代际压倒，其结果（含取消）不再写 value。
       _initCompleter = null;
@@ -268,11 +283,11 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   Future<void> _runInitialize() async {
-    _candidateBringUps++;
+    // 整条 init 链（含 IJK 兜底）共用开跑时的代际：中途被 load 压倒后，
+    // 兜底也不能再为旧源拉起 IJK。
+    final epoch = _epoch;
+    _candidateEpochs.add(epoch);
     try {
-      // 整条 init 链（含 IJK 兜底）共用开跑时的代际：中途被 load 压倒后，
-      // 兜底也不能再为旧源拉起 IJK。
-      final epoch = _epoch;
       // 三端主路径统一走官方 video_player（iOS AVPlayer / Android ExoPlayer /
       // Web <video>，由官方维护、可随意升级）。Android 额外带 IJK 软解兜底。
       if (_platform.isIOS || _platform.isWeb) {
@@ -290,6 +305,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       } on _LifecycleCanceled {
         rethrow; // 快滑换源 / 页面销毁的取消，不是媒体失败。
       } catch (vpError) {
+        // 被压倒后才浮出的失败属于旧链自身（多半是压倒者销毁了它的
+        // backend）：不 dispose（会误杀新链刚挂上的 backend）、不兜底 IJK。
+        _ensureCurrent(epoch);
         // video_player 失败 → 当次会话内用 IJK 软解兜底重试（不落盘）。
         _emit(FallbackTriggered(
           FallbackReason.error,
@@ -301,7 +319,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         _activeLineId = source.defaultLineId;
       }
     } finally {
-      _candidateBringUps--;
+      _candidateEpochs.remove(epoch);
     }
   }
 
@@ -340,7 +358,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     _ensureCurrent(epoch);
     await _disposeCurrentBackend();
     _ensureCurrent(epoch);
-    final resolved = await runSourceMiddlewares(raw, middlewares);
+    // middleware 计入 initTimeout 预算：卡死的 middleware 会让本链的
+    // finally 永不执行（候选登记悬着、调用方 future 悬着），必须有界。
+    final resolved =
+        await runSourceMiddlewares(raw, middlewares).timeout(options.initTimeout);
     _ensureCurrent(epoch);
     final backend = create(resolved);
     await _attachBackend(backend, epoch);
@@ -395,6 +416,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       } on _LifecycleCanceled {
         rethrow; // 被压倒不是线路失败：不试下一条、不发 LineSwitchFailed
       } catch (e, st) {
+        // 被压倒后才浮出的失败属于旧链自身：不再发事件、不再试下一条线路。
+        _ensureCurrent(epoch);
         if (e is TimeoutException) {
           // 与 IJK 路径一致：wall-clock 超时发独立信号，便于排障区分。
           _emit(const FallbackTriggered(FallbackReason.timeout));
@@ -470,7 +493,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final wasPlaying = value.isPlaying;
     final wasInPip = value.isInPictureInPicture;
     super.value = newValue;
-    if (_candidateBringUps == 0) {
+    if (!_candidateBringUpInFlight) {
       _stablePosition = newValue.position;
       // 用播放意图而非"正在出帧"：buffering 也是用户想播，切换 / 回滚后
       // 要续播，不能停在暂停态等用户再点一次。
@@ -509,7 +532,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       // 切换进行中，候选 backend 的 error 不进 value：切换失败要么回滚成功
       // （value 自然恢复），要么在 switchLine 的失败路径里显式落 error。
       // 否则上层会把"候选线路没起来"当成"正在播的线路挂了"去做自动容灾。
-      if (_candidateBringUps > 0 && v.phase == PlayerPhase.error) return;
+      // 只认当前代际的候选（见 _candidateEpochs）：卡死的旧链不得吞新链的 error。
+      if (_candidateBringUpInFlight && v.phase == PlayerPhase.error) return;
       // backend 不知道 platform-level PiP 状态，保留 controller 自己维护的
       // PiP state，否则会被 backend 推的默认 false 覆盖。
       value = v.copyWith(isInPictureInPicture: value.isInPictureInPicture);
@@ -527,6 +551,10 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         return;
       }
       if (e is PipModeChanged) {
+        // 本实例从未进过 PiP 的"退出"事件不属于它（PiP bus 无 owner 时的
+        // 广播兜底 / 宿主绕过 SDK 自行进的 PiP）：不暂停、不翻状态、不透传。
+        // 否则多实例场景里别的播放器退 PiP 会把正在播的实例一并暂停。
+        if (!e.isInPip && !value.isInPictureInPicture) return;
         value = value.copyWith(isInPictureInPicture: e.isInPip);
         // 退出 PiP 默认暂停（与 B 站 / YouTube mobile 一致）；业务想续播
         // 自己拦 PipModeChanged(isInPip:false) 调 play()。
@@ -554,16 +582,22 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   Future<void> _detachBackend() async {
-    await _valueSub?.cancel();
+    // 先同步摘字段再 await cancel：cancel 的 await 期间新链可能已经挂上
+    // 自己的订阅，旧链醒来后只允许动自己快照到的对象，不得再碰共享字段
+    // （否则会清掉甚至 cancel 掉新链的订阅）。
+    final valueSub = _valueSub;
+    final eventSub = _eventSub;
     _valueSub = null;
-    await _eventSub?.cancel();
     _eventSub = null;
+    await valueSub?.cancel();
+    await eventSub?.cancel();
   }
 
   Future<void> _disposeCurrentBackend() async {
+    // 同步摘 _backend，理由同 _detachBackend：await 之后共享字段可能已属于新链。
     final old = _backend;
-    await _detachBackend();
     _backend = null;
+    await _detachBackend();
     await old?.dispose();
   }
 
@@ -636,7 +670,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final savedPos = _stablePosition;
     final wasPlaying = _stablePlaying;
 
-    _candidateBringUps++;
+    _candidateEpochs.add(epoch);
     try {
       await _doSwitchTo(lineId, epoch,
           savedPos: savedPos, wasPlaying: wasPlaying);
@@ -646,6 +680,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       rethrow; // 被更晚的操作压倒：调用方得知这次没切成
     } catch (e) {
       if (_disposed) return;
+      // 被压倒后才浮出的失败属于旧链自身：不回滚、不写 value.error、
+      // 不发 LineSwitchFailed，按契约以 StateError（superseded）结束。
+      _ensureCurrent(epoch);
       // rollbackOnSwitchFailure：切换失败静默回滚到原线路。
       if (options.rollbackOnSwitchFailure) {
         try {
@@ -670,7 +707,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       _emit(LineSwitchFailed(toId: lineId, error: e));
       rethrow;
     } finally {
-      _candidateBringUps--;
+      _candidateEpochs.remove(epoch);
     }
   }
 
@@ -700,6 +737,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       } on _LifecycleCanceled {
         rethrow;
       } catch (vpError) {
+        // 被压倒后才浮出的失败属于旧链自身：不 dispose（会误杀新链刚挂上
+        // 的 backend）、不兜底 IJK。
+        _ensureCurrent(epoch);
         _emit(FallbackTriggered(
           FallbackReason.error,
           errorCode: vpError.toString(),
@@ -718,6 +758,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     }
     if (wasPlaying) {
       await _backend!.play();
+      // play 的 await 期间被压倒：这次切换不得再宣布 LineSwitched。
+      _ensureCurrent(epoch);
     }
   }
 
