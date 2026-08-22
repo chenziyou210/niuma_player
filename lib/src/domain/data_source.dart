@@ -56,6 +56,18 @@ class NiumaDataSource {
   }
 
   @override
-  String toString() =>
-      'NiumaDataSource(type: $type, uri: $uri, headers: $headers)';
+  String toString() {
+    // toString 会进异常链和日志，凭据不回显：headers 只回显 key；签名 URL
+    // 的 token 通常在 query 里，query 段整体脱敏为参数个数（[uri] 字段本身
+    // 保留原文，不影响功能）。
+    final h = headers;
+    final redacted = h == null || h.isEmpty ? null : h.keys.join(',');
+    final q = uri.indexOf('?');
+    final safeUri = q < 0
+        ? uri
+        : '${uri.substring(0, q)}'
+            '?<${uri.substring(q + 1).split('&').where((s) => s.isNotEmpty).length} params>';
+    return 'NiumaDataSource(type: $type, uri: $safeUri, '
+        'headers: ${redacted == null ? 'null' : '{$redacted}'})';
+  }
 }

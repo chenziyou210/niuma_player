@@ -647,5 +647,92 @@ void main() {
 
       await pool.dispose();
     });
+
+    test('旧 acquire 失败的迟到回调不得扣减同 key 新 entry 的持有计数', () async {
+      final initGate = Completer<void>();
+      var created = 0;
+      final bf = _FakeFactory(makeBackend: () {
+        final index = created++;
+        return _FakeBackend(initBlock: index == 0 ? () => initGate.future : null);
+      });
+      final pool = NiumaPlayerPool(
+        controllerFactory: factoryWith(bf),
+        capacity: 1,
+      );
+      const key = 'https://x/a.mp4';
+
+      // 旧 acquire 卡在 init。
+      final staleAcquire = pool.acquire(_src(key));
+      final staleOutcome = expectLater(staleAcquire, throwsStateError);
+      await Future<void>.delayed(Duration.zero);
+
+      // 强制 evict（连同它的持有计数一起清掉），同 key 重新 acquire 并持有。
+      await pool.evict(key);
+      await pool.acquire(_src(key));
+
+      // 旧 init 此刻才失败：它的持有计数早随 evict 清掉了，不得再按 key
+      // 扣一次——那会扣到新 entry 持有者头上。
+      initGate.completeError(StateError('boom'));
+      await staleOutcome;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // 新 key 触发 LRU：被持有的新 entry 不能成为 victim。
+      await pool.acquire(_src('https://x/b.mp4'));
+      expect(bf.created[1].disposed, isFalse,
+          reason: '持有计数被旧回调误扣的话，正在使用的新 entry 会被 LRU 回收');
+      expect(pool.holds(key), isTrue);
+
+      await pool.dispose();
+    });
+  });
+
+  group('stale 清理', () {
+    test('init 还在途的条目不算 stale，不被 sweep 中途销毁', () async {
+      final initGate = Completer<void>();
+      final bf = _FakeFactory(
+        makeBackend: () => _FakeBackend(initBlock: () => initGate.future),
+      );
+      final pool = NiumaPlayerPool(
+        controllerFactory: factoryWith(bf),
+        staleDuration: const Duration(milliseconds: 40),
+      );
+
+      final preloadA = pool.preload(_src('https://x/a.mp4'));
+      // 远超 staleDuration，sweep 已跑过多轮。
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(bf.created.single.disposed, isFalse,
+          reason: '慢 init 不是 stale，sweep 不得把它中途销毁');
+
+      initGate.complete();
+      await preloadA; // 老代码：controller 已被 sweep dispose，这里抛 StateError
+
+      await pool.dispose();
+    });
+  });
+
+  group('keyFor 的 headers 处理', () {
+    test('header 值不进 key 原文；同 URL 不同凭据仍分池', () {
+      NiumaMediaSource src(Map<String, String> headers) => NiumaMediaSource
+          .single(NiumaDataSource.network('https://x/a.mp4', headers: headers));
+
+      final k1 =
+          NiumaPlayerPool.keyFor(src({'Authorization': 'Bearer secret-token-1'}));
+      final k2 =
+          NiumaPlayerPool.keyFor(src({'Authorization': 'Bearer secret-token-2'}));
+
+      expect(k1, isNot(contains('secret-token-1')),
+          reason: 'key 会被调用方持有、还会进池的异常信息，凭据不得落进原文');
+      expect(k1, isNot(equals(k2)),
+          reason: '同 URL 不同鉴权不能错误复用同一个 controller');
+    });
+
+    test('k=v; 裸拼接的键值碰撞已修复', () {
+      NiumaMediaSource src(Map<String, String> headers) => NiumaMediaSource
+          .single(NiumaDataSource.network('https://x/a.mp4', headers: headers));
+
+      final merged = NiumaPlayerPool.keyFor(src({'a': '1;b=2'}));
+      final split = NiumaPlayerPool.keyFor(src({'a': '1', 'b': '2'}));
+      expect(merged, isNot(equals(split)));
+    });
   });
 }

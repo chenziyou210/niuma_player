@@ -100,7 +100,12 @@ class NiumaPlayerPool {
   /// 默认池 key：默认线路（[NiumaMediaSource.currentLine]）的数据源——
   /// network 且无 headers 时就是裸 [NiumaDataSource.uri]（向后兼容）；
   /// 非 network 类型追加 `|type=…`，带 headers 追加按 key 排序的
-  /// `|h=k=v;…`，保证同 URL 不同鉴权信息不会错误复用同一个 controller。
+  /// `|h=<len>:<name>=<valueHash>;…`，保证同 URL 不同鉴权信息不会错误复用
+  /// 同一个 controller。header **值只进哈希**：Authorization / Cookie 等
+  /// 凭据不落进 key 原文（key 会被调用方持有、还会出现在池的异常信息里）；
+  /// `<len>:` 前缀界定 name 边界，避免 `k=v;` 裸拼接的键值碰撞。哈希用
+  /// 双轮 FNV-1a 32 拼成 64-bit 摘要（见 [_fnv1a32]）：跨进程稳定、
+  /// 碰撞概率 ~2^-64，池按 key 复用 controller 的正确性可依赖它。
   /// 同一条视频无论备用线路如何，默认线路相同即同 key。
   static String keyFor(NiumaMediaSource source) {
     final ds = source.currentLine.source;
@@ -112,10 +117,31 @@ class NiumaPlayerPool {
     if (headers != null && headers.isNotEmpty) {
       buf.write('|h=');
       for (final k in headers.keys.toList()..sort()) {
-        buf.write('$k=${headers[k]};');
+        final v = headers[k]!;
+        final vHash = _fnv1a32(v, 0).toRadixString(16).padLeft(8, '0') +
+            _fnv1a32(v, _fnvSeed2).toRadixString(16).padLeft(8, '0');
+        buf.write('${k.length}:$k=$vHash;');
       }
     }
     return buf.toString();
+  }
+
+  /// 第二轮 FNV 的 seed（黄金比例常数），与第一轮组合出 64-bit 摘要。
+  static const int _fnvSeed2 = 0x9e3779b9;
+
+  /// 32-bit FNV-1a。乘 FNV prime 拆成 16-bit 半字相乘：所有中间积
+  /// < 2^41，dart2js 的 53-bit 精度下不丢位，VM / web 结果一致。
+  static int _fnv1a32(String s, int seed) {
+    var h = 0x811c9dc5 ^ seed;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.codeUnitAt(i);
+      final lo = h & 0xffff;
+      final hi = h >>> 16;
+      // h * 0x01000193 (mod 2^32)
+      h = ((lo * 0x01000193) + (((hi * 0x01000193) & 0xffff) << 16)) &
+          0xffffffff;
+    }
+    return h;
   }
 
   /// 取得一个就绪的 controller：命中直接返回，未命中建 + `initialize()`；
@@ -133,10 +159,11 @@ class NiumaPlayerPool {
       try {
         await existing.pending;
       } catch (_) {
-        // 只删自己等的那个 entry：await 期间同 key 可能已换成新 entry（ABA），
-        // 删除被跳过时要自行归还本次 acquire 的持有计数（正常删除会连
-        // _holds 一起清）。
-        _unhold(key);
+        // 只删自己等的那个 entry：await 期间同 key 可能已换成新 entry（ABA）。
+        // 不需要（也不能）额外 _unhold：entry 还是自己的则 _remove 会连
+        // _holds 一起清；已被换代则换代路径（evict / LRU / sweep）当时就
+        // 整体清过 _holds——此刻的计数属于新 entry 的持有者，扣它会让
+        // 正在使用的新播放器被 LRU / stale 误回收。
         await _remove(key, expected: existing);
         rethrow;
       }
@@ -161,7 +188,7 @@ class NiumaPlayerPool {
       entry.ready = true;
       entry.pending = null;
     } catch (_) {
-      _unhold(key);
+      // 同上：不额外 _unhold，防止扣到换代后新 entry 持有者的计数。
       await _remove(key, expected: entry);
       rethrow;
     }
@@ -280,6 +307,9 @@ class NiumaPlayerPool {
     final stale = <String>[];
     for (final e in _entries.entries) {
       if (_isHeld(e.key)) continue;
+      // init 还在途的不算 stale：慢 init 不该被中途销毁（理由同 LRU 的
+      // pending 豁免）。init 有 initTimeout 上界，settle 后自然会被回收。
+      if (e.value.pending != null) continue;
       if (now.difference(e.value.lastAccess) > staleDuration) {
         stale.add(e.key);
       }
