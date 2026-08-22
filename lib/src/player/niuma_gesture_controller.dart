@@ -61,10 +61,17 @@ class NiumaGestureController {
   bool _isDisabled(GestureKind kind) => disabledGestures.contains(kind);
 
   /// 异步读初始亮度，[restoreBrightness] 时恢复。widget 在 init 时调一次。
+  /// backend 未挂载 / 读回迟到的兜底：首次亮度手势会用"改动前的基准"补位
+  /// [_initialBrightness]（见 [onPanUpdate]），保证只要动过亮度，dispose
+  /// 时就有初值可恢复——这里的读回用 `??=`，不回退已占位的手势基准。
   void initBrightness() {
-    player.backend?.getBrightness().then((v) {
-      _initialBrightness = v;
-    });
+    final backend = player.backend;
+    if (backend == null) return;
+    unawaited(backend.getBrightness().then<void>((v) {
+      _initialBrightness ??= v;
+    }).catchError((Object _) {
+      // 读失败（channel 不可用等）：没有可恢复的初值，静默。
+    }));
   }
 
   void _showHud(GestureFeedbackState state) {
@@ -180,6 +187,12 @@ class NiumaGestureController {
       if (_disposed || seq != _gestureSeq || _lockedKind != kind) return;
       _origValue = orig;
       _origValueReady = true;
+      // 初值兜底：initBrightness 调用时 backend 未挂载会永久跳过采集
+      // （示例里 initState 就调，而 initialize 可能还没跑完）。首次亮度
+      // 手势的基准就是"改动前的亮度"，恰可补作恢复初值。
+      if (kind == GestureKind.brightness) {
+        _initialBrightness ??= orig;
+      }
     }
 
     // onPanEnd 可能在上面的 await 期间清掉它；到这里一定非空（要么没经过

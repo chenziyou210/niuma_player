@@ -277,4 +277,48 @@ void main() {
     expect(backend.lastSeek, isNull);
     await controller.dispose();
   });
+
+  test('未调 initBrightness（backend 挂载前被跳过的时序）：首次亮度手势的基准补作恢复初值',
+      () async {
+    final (controller, backend, g) = await build();
+    // 不调 initBrightness——模拟示例在 initState 里调用时 backend 还没挂载。
+    g.onPanStart(const Offset(50, 150));
+    await g.onPanUpdate(const Offset(50, 30), size); // 基准 0.3，上滑改亮度
+    g.onPanEnd();
+    expect(backend.brightnessSets, isNotEmpty);
+    expect(backend.brightness, isNot(closeTo(0.3, 0.001)));
+
+    g.dispose();
+    await Future<void>.delayed(Duration.zero);
+    expect(backend.brightnessSets.last, closeTo(0.3, 0.001),
+        reason: '初值缺采时，用首次亮度手势"改动前的基准"兜底恢复');
+    await controller.dispose();
+  });
+
+  test('初始亮度还没读回就 dispose：手势基准兜底保证亮度仍被恢复', () async {
+    final (controller, backend, g) = await build();
+    backend.gateBrightness = true;
+
+    g.initBrightness(); // 初值读取挂起（gate[0]），dispose 前不会回来
+    g.onPanStart(const Offset(50, 150));
+    final update = g.onPanUpdate(const Offset(50, 30), size); // 基准读取挂起（gate[1]）
+    backend.brightnessGates[1].complete();
+    await update; // 手势把亮度改掉了（基准 0.3 已兜底占位为初值）
+    expect(backend.brightnessSets, hasLength(1));
+
+    // 初值仍未读回就 dispose：靠手势基准兜底的初值完成恢复。
+    g.dispose();
+    await Future<void>.delayed(Duration.zero);
+    expect(backend.brightnessSets, hasLength(2),
+        reason: '亮度不能停在手势改过的值上');
+    expect(backend.brightnessSets.last, closeTo(0.3, 0.001));
+
+    // 迟到的初值读回：不得再重复恢复，也不得回退已占位的基准。
+    backend.brightnessGates[0].complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(backend.brightnessSets, hasLength(2),
+        reason: '恢复只做一次，迟到读回不追加动作');
+
+    await controller.dispose();
+  });
 }
