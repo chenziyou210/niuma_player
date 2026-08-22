@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:niuma_player/niuma_player.dart';
+import 'package:niuma_player/src/data/_pip_event_bus.dart';
 
 import 'helpers/fakes.dart';
 
@@ -450,6 +451,166 @@ void main() {
       expect(ctrl.activeLineId, 'c');
 
       await sub.cancel();
+      await ctrl.dispose();
+    });
+  });
+
+  group('终局失败与迟到回调的清理', () {
+    test('初始化终局失败后：失败候选必须被摘除销毁，迟到的 ready 不得覆盖 error',
+        () async {
+      final initGate = Completer<void>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (_) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          initBlock: () => initGate.future,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      final init = ctrl.initialize();
+      final initOutcome = expectLater(init, throwsA(isA<StateError>()));
+      await _settle();
+      final backend = factory.videoPlayers.single;
+
+      // 终局失败：不可重试、无备用线路、无 IJK 兜底（iOS）。
+      initGate.completeError(StateError('init failed'));
+      await initOutcome;
+      await _settle();
+
+      expect(ctrl.value.phase, PlayerPhase.error);
+      expect(backend.disposed, isTrue,
+          reason: 'Future.timeout 不取消底层初始化：失败候选不销毁的话，'
+              '平台侧还在后台继续加载');
+      expect(ctrl.backend, isNull);
+
+      // 老代码里失败候选仍挂在 controller 上：迟到的 ready 会把 error 覆盖。
+      backend.emitValue(backend.value.copyWith(phase: PlayerPhase.ready));
+      await _settle();
+      expect(ctrl.value.phase, PlayerPhase.error,
+          reason: '迟到的 ready 不得复活已宣告失败的播放器');
+
+      await ctrl.dispose();
+    });
+
+    test(
+        'PiP 能力查询不阻塞 initialize 完成；查询期间被 load 压倒后，'
+        '旧 backend 的迟到结果不得写进新媒体', () async {
+      final queryGateA = Completer<bool>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (ds) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          pipQueryBlock: ds.uri == srcA.uri ? () => queryGateA.future : null,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      final init = ctrl.initialize();
+      var initDone = false;
+      unawaited(init.then((_) => initDone = true, onError: (Object _) {}));
+      await _settle();
+      // 查询是 best-effort：拉起成功即完成 initialize，不等 method channel
+      // 往返——否则 dispose / switchLine 打断查询后旧 initialize 反而成功。
+      expect(initDone, isTrue,
+          reason: 'PiP 能力查询不得把 initialize 的完成挡在自己身后');
+
+      await ctrl.load(NiumaMediaSource.single(srcB)); // B 的查询立即返回 false
+      expect(ctrl.value.isPictureInPictureSupported, isFalse);
+
+      queryGateA.complete(true); // 旧 backend 此刻才回答"支持"
+      await _settle();
+
+      expect(ctrl.value.isPictureInPictureSupported, isFalse,
+          reason: '旧 backend 的能力结果不得污染新媒体的 value');
+
+      await ctrl.dispose();
+    });
+
+    test('dispose 时 PiP 查询在途：initialize 已在 dispose 前完成，迟到结果安全丢弃',
+        () async {
+      final queryGate = Completer<bool>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (_) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          pipQueryBlock: () => queryGate.future,
+        ),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      final init = ctrl.initialize();
+      var initDone = false;
+      unawaited(init.then((_) => initDone = true, onError: (Object _) {}));
+      await _settle();
+      expect(initDone, isTrue,
+          reason: '此前查询挡在 complete 之前，dispose 打断后 initialize '
+              '会在 dispose 之后才"成功"');
+
+      await ctrl.dispose();
+      queryGate.complete(true); // 查询此刻才回来
+      await _settle();
+      expect(ctrl.value.isPictureInPictureSupported, isFalse,
+          reason: 'dispose 后迟到的查询结果不得再写 value');
+    });
+
+    test('失败候选的清理本身抛错：不得替换原始初始化错误', () async {
+      final initGate = Completer<void>();
+      final factory = FakeBackendFactory(
+        makeVideoPlayer: (_) => FakePlayerBackend(
+          kind: PlayerBackendKind.videoPlayer,
+          initBlock: () => initGate.future,
+        )..disposeError = StateError('cleanup blew up'),
+      );
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        retryPolicy: const RetryPolicy.none(),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      final init = ctrl.initialize();
+      final initOutcome = expectLater(init, throwsA(isA<TimeoutException>()));
+      await _settle();
+
+      initGate.completeError(TimeoutException('init timed out'));
+      await initOutcome; // 原始错误不得被清理错误顶掉
+      await _settle();
+      expect(ctrl.value.error?.category, PlayerErrorCategory.network,
+          reason: '清理错误顶掉超时错误会把 network 分类改成 unknown，'
+              '带偏 retry / failover 决策');
+
+      await ctrl.dispose();
+    });
+
+    test('PiP 中 load() 重建 backend：新 backend 收养 PiP 会话归属', () async {
+      addTearDown(debugResetPipEventBus);
+      final factory = FakeBackendFactory();
+      final ctrl = NiumaPlayerController(
+        NiumaMediaSource.single(srcA),
+        platform: FakePlatformBridge(isIOS: true),
+        backendFactory: factory,
+      );
+      await ctrl.initialize();
+      final oldBackend = ctrl.backend!;
+      // 模拟已在 PiP 中：置位 + 会话归属旧 backend（真实流程由
+      // enterPictureInPicture 完成）。
+      ctrl.value = ctrl.value.copyWith(isInPictureInPicture: true);
+      claimPipOwnership(oldBackend);
+
+      await ctrl.load(NiumaMediaSource.single(srcB));
+
+      expect(identical(ctrl.backend, oldBackend), isFalse);
+      expect(debugPipOwner, same(ctrl.backend),
+          reason: 'Activity 级 PiP 会话还在继续，新 backend 不接管的话，'
+              '遥控与 pipStopped 全被 tombstone 丢弃');
+
       await ctrl.dispose();
     });
   });

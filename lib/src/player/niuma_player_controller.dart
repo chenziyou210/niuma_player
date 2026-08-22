@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import 'package:niuma_player/src/capabilities/niuma_capabilities.dart';
+import 'package:niuma_player/src/data/_pip_event_bus.dart'
+    show adoptOrphanedPipSession;
 import 'package:niuma_player/src/data/default_backend_factory.dart';
 import 'package:niuma_player/src/data/default_platform_bridge.dart';
 import 'package:niuma_player/src/domain/backend_factory.dart';
@@ -181,11 +183,23 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     if (_initCompleter != null) return _initCompleter!.future;
     final completer = Completer<void>();
     _initCompleter = completer;
+    // 完成前复查用：拉起期间被压倒的链自己会以 _LifecycleCanceled 结束，
+    // 这里防的是"拉起成功之后、complete 之前"的窗口——dispose / switchLine /
+    // load 在此窗口压倒时，本次 initialize 不得宣布成功（epoch 复查同时
+    // 覆盖三者；单查 _initCompleter 身份盖不住 switchLine 和 dispose）。
+    final epoch = _epoch;
     _runInitialize().then(
-      (_) async {
-        // 初始化成功后主动查 PiP 能力——backend 不会自己推支持状态。
-        await _queryAndUpdatePipSupport();
-        if (!completer.isCompleted) completer.complete();
+      (_) {
+        // PiP 能力查询是 best-effort，**不阻塞 initialize 完成**：查询自带
+        // backend 身份复查，迟到结果安全丢弃。此前查询挡在 complete 之前，
+        // dispose / switchLine 打断查询后旧 initialize 反而完成为成功。
+        unawaited(_queryAndUpdatePipSupport());
+        if (completer.isCompleted) return;
+        if (_disposed || epoch != _epoch) {
+          completer.completeError(_LifecycleCanceled());
+          return;
+        }
+        completer.complete();
       },
       onError: (Object e, StackTrace st) {
         final isCurrent = _initCompleter == completer;
@@ -365,8 +379,30 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     _ensureCurrent(epoch);
     final backend = create(resolved);
     await _attachBackend(backend, epoch);
-    await backend.initialize().timeout(options.initTimeout);
+    try {
+      await backend.initialize().timeout(options.initTimeout);
+    } catch (e) {
+      // Future.timeout 不会取消底层初始化：失败/超时的候选若继续挂在
+      // controller 上，平台侧还在后台加载，迟到的 ready 会把终局失败写入
+      // 的 error 覆盖掉。立即摘订阅并销毁——仅当它还是当前 backend
+      // （被压倒后新链可能已挂上自己的，那不归这里管）。
+      if (identical(_backend, backend)) {
+        try {
+          await _disposeCurrentBackend();
+        } catch (_) {
+          // best-effort：清理失败不得替换原始初始化错误——那会改变
+          // _categorize 的结果，进而带偏 retry / IJK 兜底 / failover 决策。
+        }
+      }
+      rethrow;
+    }
     _ensureCurrent(epoch);
+    // PiP 中换 backend（load 换源 / switchLine / IJK 兜底）：系统会话还在
+    // 继续，旧 backend 的归属已成 tombstone，新 backend 收养它，否则遥控
+    // 与 pipStopped 全被丢弃。不在 PiP 中则是空操作。
+    if (value.isInPictureInPicture) {
+      adoptOrphanedPipSession(backend);
+    }
   }
 
   PlayerBackend _createVideoPlayer(
@@ -565,6 +601,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         return;
       }
       if (e is PipRemoteAction) {
+        // PiP 窗的遥控只属于正在 PiP 中的实例：bus 无 owner 的广播兜底 /
+        // owner 已 dispose 的迟到事件不得让所有实例一起播放/暂停。
+        if (!value.isInPictureInPicture) return;
         if (e.action == 'playPauseToggle') {
           if (value.phase == PlayerPhase.playing) {
             unawaited(pause());
@@ -831,7 +870,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     if (backend == null) return;
     try {
       final supported = await backend.queryPictureInPictureSupport();
-      if (_disposed) return;
+      // 查询期间 load() 可能已换 backend：旧 backend 的能力（vp / IJK / web
+      // 各不相同）不得写进新媒体的 value。
+      if (_disposed || !identical(_backend, backend)) return;
       if (value.isPictureInPictureSupported != supported) {
         value = value.copyWith(isPictureInPictureSupported: supported);
       }

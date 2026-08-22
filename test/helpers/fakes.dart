@@ -13,6 +13,7 @@ class FakePlayerBackend extends PlayerBackend {
     this.supportsSourceSwap = false,
     this.loadBlock,
     this.playBlock,
+    this.pipQueryBlock,
   });
 
   @override
@@ -41,6 +42,10 @@ class FakePlayerBackend extends PlayerBackend {
   /// "resume playback" step open to race another operation into it.
   final Future<void> Function()? playBlock;
 
+  /// If non-null, [queryPictureInPictureSupport] returns this future's value —
+  /// lets tests hold the capability query open across a load().
+  final Future<bool> Function()? pipQueryBlock;
+
   /// Every source handed to [load], in call-completion order.
   final List<NiumaDataSource> loadedSources = <NiumaDataSource>[];
 
@@ -59,6 +64,10 @@ class FakePlayerBackend extends PlayerBackend {
   NiumaPlayerValue _value = NiumaPlayerValue.uninitialized();
 
   bool disposed = false;
+
+  /// If non-null, [dispose] throws it once (then clears) — simulates a
+  /// platform-side cleanup failure racing an initialization error.
+  Object? disposeError;
 
   /// Last argument passed to [seekTo]; null if seekTo was never called.
   Duration? lastSeekTarget;
@@ -121,6 +130,12 @@ class FakePlayerBackend extends PlayerBackend {
   }
 
   @override
+  Future<bool> queryPictureInPictureSupport() {
+    if (pipQueryBlock != null) return pipQueryBlock!();
+    return super.queryPictureInPictureSupport();
+  }
+
+  @override
   Future<void> play() async {
     if (playBlock != null) await playBlock!();
     playCalls++;
@@ -148,6 +163,11 @@ class FakePlayerBackend extends PlayerBackend {
     disposed = true;
     await _valueController.close();
     await _eventController.close();
+    final e = disposeError;
+    if (e != null) {
+      disposeError = null; // one-shot：controller 收尾时的第二次 dispose 不再抛
+      throw e;
+    }
   }
 }
 
