@@ -279,8 +279,14 @@ class WebVideoBackend extends PlayerBackend {
     });
     _on('error', () {
       if (_disposed) return;
-      final code = _video.error?.code;
-      final msg = _video.error?.message ?? 'unknown video error';
+      final mediaError = _video.error;
+      // load() 换源会重置 error 属性并按 spec 清空排队中的媒体任务；万一
+      // 旧源的 error 事件仍穿过来，当前元素 error 为 null 即证明它已过期，
+      // 不得把新源打成 error。
+      if (mediaError == null) return;
+      final code = mediaError.code;
+      final msg =
+          mediaError.message.isEmpty ? 'unknown video error' : mediaError.message;
       PlayerErrorCategory cat;
       switch (code) {
         case 1: // MEDIA_ERR_ABORTED
@@ -297,7 +303,7 @@ class WebVideoBackend extends PlayerBackend {
       final err = PlayerError(
         category: cat,
         message: msg,
-        code: code?.toString(),
+        code: code.toString(),
       );
       _setPhase(
         PlayerPhase.error,

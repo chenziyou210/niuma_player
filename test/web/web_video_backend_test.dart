@@ -228,6 +228,53 @@ void main() {
     });
   });
 
+  group('过期 DOM 事件', () {
+    test('元素无 error 状态时的裸 error 事件（旧源过期事件）不得把当前源打成 error',
+        () async {
+      final backend = WebVideoBackend(hls('stale-error'));
+      final init = backend.initialize();
+      await settle();
+      fakeMetadata(backend.htmlVideoElement, duration: 10);
+      await init.timeout(const Duration(seconds: 2));
+      expect(backend.value.phase, PlayerPhase.ready);
+
+      // load() 换源会清 error 属性并按 spec 移除排队中的媒体任务；模拟仍有
+      // 一条旧 error 事件穿过来：此刻 video.error == null，即证明它已过期。
+      backend.htmlVideoElement.dispatchEvent(web.Event('error'));
+      await settle();
+
+      expect(backend.value.phase, PlayerPhase.ready,
+          reason: '过期的 error 事件不得覆盖当前源的状态');
+      await backend.dispose();
+    });
+
+    test('load 换源后旧 metadata 事件到达而新源未就绪：不得误完成新源', () async {
+      final backend = WebVideoBackend(hls('gen-a'));
+      final init = backend.initialize();
+      await settle();
+      fakeMetadata(backend.htmlVideoElement, duration: 10);
+      await init.timeout(const Duration(seconds: 2));
+
+      final load = backend.load(hls('gen-b'));
+      await settle();
+      // 新源元数据未到（duration 回到 NaN）；旧源的 loadedmetadata 此刻穿过来。
+      fakeMetadata(backend.htmlVideoElement, duration: double.nan, readyState: 0);
+      await settle();
+
+      var loadDone = false;
+      unawaited(load.then((_) => loadDone = true));
+      await settle();
+      expect(loadDone, isFalse,
+          reason: '现场读 readyState/duration 的守卫：旧事件不得完成新源的 completer');
+
+      // 新源真正就绪后正常完成。
+      fakeMetadata(backend.htmlVideoElement, duration: 20);
+      await load.timeout(const Duration(seconds: 2));
+      expect(backend.value.duration, const Duration(seconds: 20));
+      await backend.dispose();
+    });
+  });
+
   group('headers', () {
     test('非 hls.js 路径传 headers 不再把 crossOrigin 设成 anonymous', () async {
       final backend = WebVideoBackend(NiumaDataSource.network(

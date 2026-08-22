@@ -58,6 +58,80 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **并发竞态第四轮收口（复审跟进）。**
+  - **PiP 能力查询不再阻塞 `initialize()` 完成**（best-effort，`unawaited`，
+    查询自带 backend 身份复查）：此前查询挡在 complete 之前，`dispose()` /
+    `switchLine()` 打断查询后旧 initialize 反而在其后"完成为成功"（dispose
+    不清 completer、switchLine 不换 completer，单查 completer 身份盖不住）。
+    另在完成前按 initialize 入口捕获的 epoch 复查 `_disposed || epoch` ——
+    拉起成功到 complete 之间的窗口也封死。
+  - **PiP 中重建 backend 后新 backend 收养会话归属**：PiP 中 `load()` 换源 /
+    `switchLine` / IJK 兜底会 dispose 旧 backend（归属成 tombstone），
+    Activity 级 PiP 会话还在继续，此前遥控与 `pipStopped` 全被丢弃。新增
+    `adoptOrphanedPipSession`：仅当当前 owner 已注销时把会话交给新
+    backend（活 owner 不可被抢），controller 在拉起成功且自认在 PiP 中时
+    调用。
+  - **无 owner 的广播兜底收紧为"恰好一个订阅者才投递"**：宿主绕过 SDK 自行
+    进 PiP 时，单实例兼容行为保留；多实例下无主会话归属不明，广播会把所有
+    实例翻进 PiP 态、遥控让全体一起播放/暂停，现改为丢弃（onResume 兜底
+    纠正状态）。
+  - **失败候选的清理错误不再顶掉原始初始化错误**：`_bringUp` 失败路径的
+    dispose 改为 best-effort（吞掉清理异常后按原 stack rethrow）——此前
+    清理抛错会把网络/超时错误替换成清理错误，改变 `_categorize` 分类进而
+    带偏 retry / IJK 兜底 / failover。
+  - 手势初始亮度兜底：`initBrightness()` 在 backend 挂载前调用会永久跳过
+    采集（示例的 `initState` 时序即如此），现以首次亮度手势"改动前的基准"
+    补作恢复初值。
+  - `NiumaPlayerPool.keyFor` 的 header 值哈希从 `String.hashCode` 换成双轮
+    FNV-1a 32（64-bit 摘要，纯 Dart、VM/web 结果一致）：跨进程稳定、碰撞
+    ~2^-64，池按 key 复用 controller 的正确性可依赖。
+  - `NiumaDataSource.toString()` 对 uri 的 query 段脱敏（签名 URL 的 token
+    通常在 query 里），替换为参数个数提示；`uri` 字段本身保留原文。
+  - **Android lint 清零（存量 NewApi）**：`createPlayPauseRemoteAction`
+    （`RemoteAction` 需 API 26、`Icon.createWithResource` 需 API 23，调用方
+    均有运行时守卫）补 `@RequiresApi(O)`；`FEATURE_PICTURE_IN_PICTURE`
+    内联常量豁免 InlinedApi。`:niuma_player:lintDebug` 此前 2 errors 直接
+    构建失败。
+- **并发竞态第三轮收口（复审跟进）。**
+  - **初始化失败/超时的候选立即摘除销毁**：`Future.timeout` 不取消底层
+    初始化，此前终局失败后失败候选仍挂在 controller 上——平台侧还在后台
+    加载，迟到的 `ready` 会把已写入的 `error` 覆盖掉。现在 `_bringUp` 内
+    初始化异常时按 `identical` 校验后就地 dispose（覆盖 initialize /
+    switchLine / 回滚全部拉起路径）。
+  - **池持有计数的二次 ABA（上一轮修复引入的回归）**：acquire 失败路径的
+    无条件 `_unhold(key)` 会在 entry 已被 evict 换代后扣到**新 entry 持有
+    者**的计数，让正在使用的播放器被 LRU/stale 误回收。换代路径本就整体
+    清过 `_holds`，该补偿本不需要——已移除，失败清理仅走 `identical`
+    校验的 `_remove`。
+  - **PiP owner 注销不再回退广播串台**：backend dispose（feed 划走 PiP 中
+    的播放器 / PiP 中 `load()` 重建）此前立即释放归属，系统会话未结束时
+    后续 `playPauseToggle` / `pipStarted` 广播给所有实例。现在归属保留为
+    tombstone（死 owner 的事件丢弃），`pipStopped` / `pipFailed` 清场；
+    顶替 claim 走一格交接窗口：第一条 `pipStopped` 归前任、`pipStarted`
+    关窗并给前任补退出事件、顶替者进入失败时归属还给前任。controller 侧
+    `PipRemoteAction` 补"本实例在 PiP 中"守卫。
+  - **PiP 能力查询期间被 `load()` 压倒**：旧 backend 的查询结果不再写进
+    新媒体的 value（按 backend `identical` 复查）；查询期间被压倒的旧
+    `initialize()` 按契约以 superseded `StateError` 结束，不再事后宣布成功。
+  - stale 清理跳过 init 还在途的条目（与 LRU 的 pending 豁免同理），慢
+    preload 不再被 sweep 中途销毁。
+- **Android PiP 遥控 receiver 在 API ≤32 上隐式导出**：动态注册未带保护，
+  任何应用广播 `ACTION_PIP_PLAY_PAUSE` 即可控制播放。改用
+  `ContextCompat.registerReceiver(..., RECEIVER_NOT_EXPORTED)`（androidx.core
+  在旧版本用应用私有签名权限背书），android 模块新增 `androidx.core:core`
+  依赖。
+- **凭据脱敏**：`NiumaDataSource.toString()` 不再回显 header 值（只回显
+  header 名）——toString 会进异常链与日志；`NiumaPlayerPool.keyFor` 的
+  header 值改进哈希、name 加长度前缀（key 会被调用方持有、还会出现在池的
+  异常信息里），同时修复 `k=v;` 裸拼接的键值碰撞。带 headers 的 key 格式
+  因此变更（无 headers 的裸 URL key 不变）。
+- **手势初始亮度读回前 dispose 丢恢复**：`initBrightness` 的读数迟到时，
+  若手势已动过亮度，现在补一次恢复到初值（此前 restore 因初值为 null 被
+  跳过，亮度停在手势改过的值上）；读失败不再是潜在的 unhandled error。
+- **Web `<video>` 过期 error 事件**：元素 `error` 属性为 null（`load()`
+  换源已重置）时收到的 error 事件视为过期直接忽略，不再合成
+  "unknown video error" 打断新源；补"旧 DOM 事件在 load 后到达"的浏览器
+  回归测试。
 - **过期链醒来后的收尾不再伤及新链（并发竞态第二轮收口）。**
   - `initialize()` / `switchLine()` 的 vp 失败兜底 catch 现在先做代际检查：
     被 `load()` / 新 `switchLine()` 压倒后才浮出的失败属于旧链自身（多半是
