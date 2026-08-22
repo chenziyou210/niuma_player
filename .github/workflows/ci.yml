@@ -51,7 +51,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          # upload-artifact@v4 重名直接报错（v3 才是合并），矩阵每条腿必须唯一
+          name: coverage-${{ matrix.label }}
           path: coverage/lcov.info
           if-no-files-found: ignore
 

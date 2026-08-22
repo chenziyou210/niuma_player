@@ -208,6 +208,26 @@ void main() {
     });
   });
 
+  group('initialize 前元数据已就绪（构造期已设 src 的缓存命中）', () {
+    test('metadata 先于 initialize 到达：initialize 仍能完成，不永挂到 initTimeout',
+        () async {
+      final backend = WebVideoBackend(hls('cached'));
+      // 构造函数已挂好事件监听；模拟极快就绪（缓存命中）的媒体在
+      // initialize 之前就触发 metadata——once-only 标记在此被提前消耗。
+      fakeMetadata(backend.htmlVideoElement, duration: 10);
+      await settle();
+
+      final init = backend.initialize();
+      await settle();
+      // initialize 重新触发的 metadata 必须还能完成本代 completer。
+      fakeMetadata(backend.htmlVideoElement, duration: 10);
+
+      await init.timeout(const Duration(seconds: 2));
+      expect(backend.value.phase, PlayerPhase.ready);
+      await backend.dispose();
+    });
+  });
+
   group('headers', () {
     test('非 hls.js 路径传 headers 不再把 crossOrigin 设成 anonymous', () async {
       final backend = WebVideoBackend(NiumaDataSource.network(

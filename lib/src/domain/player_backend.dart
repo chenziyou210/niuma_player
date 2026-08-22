@@ -43,8 +43,10 @@ abstract class PlayerBackend {
   /// 当前状态快照。与 [valueStream] 同步更新。
   NiumaPlayerValue get value;
 
-  /// 状态快照流。订阅时为方便起见必须立即发出当前值
-  /// （实现应使用 broadcast + replay-latest）。
+  /// 状态快照流。broadcast、**不 replay**：订阅不会立即补发当前值，
+  /// 订阅时刻的即时快照请用 [value] 同步读取。
+  /// （[NiumaPlayerController] 在 `initialize()` 之前就完成订阅，因此
+  /// 不会漏事件；replay 反而会在换 backend 时把半成品初始值打进 value。）
   Stream<NiumaPlayerValue> get valueStream;
 
   /// backend 级事件（目前只有错误；像 `BackendSelected` 这种 controller

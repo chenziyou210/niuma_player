@@ -317,6 +317,11 @@ class WebVideoBackend extends PlayerBackend {
   @override
   Future<void> initialize() {
     if (_disposed) return Future<void>.value();
+    // 构造函数已提前设 src：极快就绪（缓存命中）的媒体可能在 initialize 之前
+    // 就把 once-only 的 _initialized 置过 true（那时还没有 completer 可完成）。
+    // 重置它，让本代 load() 重新触发的 metadata 能完成本代 completer，
+    // 否则 initialize 会一直挂到 initTimeout 被误判成超时失败。
+    _initialized = false;
     final completer = _beginGeneration();
     final gen = _gen;
     if (_useHlsJs) {

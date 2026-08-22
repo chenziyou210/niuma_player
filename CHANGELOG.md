@@ -9,6 +9,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`PlayerBackend.valueStream` 契约按现状修正**：文档此前写"订阅必须立即
+  发出当前值（replay-latest）"，但三个实现从来都是普通 broadcast、controller
+  也依赖"先订阅后 initialize"的顺序而非 replay。现在契约明确为**不 replay**，
+  订阅时刻的快照用 `value` 同步读取——replay 反而会在换 backend 时把半成品
+  初始值打进 `value`。
+- **source middleware 计入 `initTimeout` 预算**：`initialize()` / `load()` /
+  `switchLine()` 的 middleware 流水线此前无界，卡死的 middleware 会让调用方
+  future 永远悬着、候选登记永不注销。超时按既有语义视作该次拉起失败
+  （可重试 / 触发 failover）。
+
 - 仓库地址统一为 `github.com/doubledog789/niuma_player`（pubspec 的
   homepage / repository / issue_tracker / documentation、podspec、文档）。
 - **Android `PlayerSession`**：每个 `notify*` 入口加主线程守卫——不在主线程
@@ -48,6 +58,50 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **过期链醒来后的收尾不再伤及新链（并发竞态第二轮收口）。**
+  - `initialize()` / `switchLine()` 的 vp 失败兜底 catch 现在先做代际检查：
+    被 `load()` / 新 `switchLine()` 压倒后才浮出的失败属于旧链自身（多半是
+    压倒者销毁了它的 backend），不再 `dispose` 当前 backend（此前会**误杀
+    新链刚挂上的 backend**，`_backend` 置空、play/pause 全部空操作）、不再
+    为旧源拉起 IJK、不再上报 `FallbackTriggered` / `LineSwitchFailed`。
+  - `_detachBackend` / `_disposeCurrentBackend` 改为**先同步摘共享字段再
+    await cancel/dispose 快照对象**：旧链在 cancel 的 await 期间醒来不会再
+    清掉甚至 cancel 掉新链的订阅。
+  - 候选拉起的 error 抑制与稳定快照冻结从全局计数改为**按代际登记**
+    （`Set<int>`）：卡死在 middleware / 平台 Future 里的旧链不再永久吞掉
+    新链 backend 的真实 error、不再永久冻结切换快照。middleware 现在计入
+    `initTimeout` 预算（此前无界，可让 `load()` future 永远悬着）。
+  - `load()` 原地换源在 `backend.load` 之后、`switchLine` 在恢复播放的
+    `play()` 之后补上代际复查：被压倒的 `load()` 不再"明明输了还宣布成功"
+    （屏幕是 A、`source` 是 B），被压倒的 `switchLine` 不再事后补发
+    `LineSwitched`。
+  - `test/controller_concurrency_test.dart` 新增 4 个交错序列用例。
+- **PiP 事件多实例串台**：所有 backend 共用同一条 PiP EventChannel，事件不带
+  播放器身份，一个播放器退出 PiP 时**其他正在播的 controller 也会收到
+  `pipStopped` 被自动暂停**（播放器池 / feed 多实例必现）。现在归属在 Dart
+  侧维护：backend 发起进入 PiP 时 claim owner，`pipStopped` / `pipFailed`
+  结束会话自动释放；有 owner 时事件只投给 owner，无 owner（宿主绕过 SDK
+  自行进 PiP）保持广播兼容单实例旧行为。controller 侧再加一道防线：本实例
+  从未进过 PiP 时收到的"退出"事件不暂停、不透传。新增
+  `test/data/pip_event_bus_test.dart`。
+- **`NiumaPlayerPool` 同 key 换代（ABA）竞态**：`_remove(key)` 不校验条目
+  身份，被 evict 淘汰的旧 preload 的失败回调迟到时，会把同 key 的**新**
+  entry 连人带持有计数一起删掉并 dispose（acquire 方拿到已释放的
+  controller）。现在移除按 `identical` 校验预期条目，失败路径只归还自己的
+  持有计数；init 还在途的 preload 不再被选为 LRU victim（中途 dispose 白干
+  一次拉起还触发上述 ABA）。
+- **`NiumaGestureController.dispose()` 后在途异步回调触碰已释放的 notifier**：
+  拖动中页面销毁时，亮度 / 音量基准值经 method channel 的读数回来后仍会
+  `_showHud` 写已 dispose 的 `feedback` ValueNotifier（debug 断言崩溃）；
+  dispose 后 `onPanEnd` 还会新建 HUD 隐藏 Timer 再撞一次。现在 dispose 置位
+  并幂等，所有手势入口与在途回调（读数、Timer）此后全部安全空操作。
+- **`WebVideoBackend` 构造期设 src 的缓存命中可让 `initialize()` 永挂**：
+  极快就绪的媒体在 `initialize()` 之前触发 metadata 会提前消耗 once-only 的
+  就绪标记（彼时还没有 completer 可完成），之后 `initialize()` 一直挂到
+  `initTimeout` 被误判成超时失败。现在 `initialize()` 重置该标记。
+- **CI 覆盖率 artifact 重名**：analyze+test 矩阵两条腿都上传 `name: coverage`，
+  upload-artifact@v4 对重名直接报错（v3 才是合并），后完成的腿必红。改为
+  `coverage-${{ matrix.label }}`。
 - **`switchLine` 失败时候选线路的 `phase=error` 不再泄漏进 `value`；切换前
   快照取自稳定状态。** 模拟器验收抓到：用户切到不可用线路，候选 backend 初始化
   阶段推出的 error 进了 `value`，上层"播放中途自动容灾"据此抢先又发起一次
