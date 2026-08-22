@@ -51,6 +51,11 @@ class NiumaGestureController {
   double? _initialBrightness;
   DateTime? _lastChannelSet;
 
+  /// [dispose] 后置 true。亮度 / 音量基准值经 method channel 异步读回、
+  /// HUD 隐藏走 Timer——两者都可能在 dispose 之后才回来，此时绝不能再碰
+  /// 已释放的 [_feedback] notifier。
+  bool _disposed = false;
+
   static const double _dragThreshold = 18;
 
   bool _isDisabled(GestureKind kind) => disabledGestures.contains(kind);
@@ -63,18 +68,22 @@ class NiumaGestureController {
   }
 
   void _showHud(GestureFeedbackState state) {
+    if (_disposed) return;
     _feedback.value = state;
     _hideTimer?.cancel();
   }
 
   void _scheduleHide() {
+    if (_disposed) return;
     _hideTimer = Timer(const Duration(milliseconds: 600), () {
+      if (_disposed) return;
       _feedback.value = null;
     });
   }
 
   /// 双击 → 切播放 / 暂停。
   void onDoubleTap() {
+    if (_disposed) return;
     if (_isDisabled(GestureKind.doubleTap)) return;
     final phase = player.value.phase;
     if (phase == PlayerPhase.playing) {
@@ -99,6 +108,7 @@ class NiumaGestureController {
 
   /// 长按开始 → 临时 2x 倍速。
   void onLongPressStart() {
+    if (_disposed) return;
     if (_isDisabled(GestureKind.longPressSpeed)) return;
     _originalSpeed = player.value.playbackSpeed;
     player.setPlaybackSpeed(2.0);
@@ -112,6 +122,7 @@ class NiumaGestureController {
 
   /// 长按结束 → 恢复原倍速。
   void onLongPressEnd() {
+    if (_disposed) return;
     final speed = _originalSpeed;
     if (speed != null) {
       player.setPlaybackSpeed(speed);
@@ -122,6 +133,7 @@ class NiumaGestureController {
 
   /// pan 开始 → 记录起点，清锁定方向。[localPosition] 为手势相对视频区的坐标。
   void onPanStart(Offset localPosition) {
+    if (_disposed) return;
     _panStart = localPosition;
     _seekStart = player.value.position;
     _lockedKind = null;
@@ -144,6 +156,7 @@ class NiumaGestureController {
   /// pan 更新 → 首次过阈值时锁定方向（水平 seek / 左亮度 / 右音量），
   /// 之后按锁定方向更新。[size] 为视频区尺寸。
   Future<void> onPanUpdate(Offset localPosition, Size size) async {
+    if (_disposed) return;
     final dx = localPosition.dx - _panStart.dx;
     final dy = localPosition.dy - _panStart.dy;
 
@@ -162,8 +175,9 @@ class NiumaGestureController {
       final kind = _lockedKind!;
       final seq = _gestureSeq;
       final orig = await _readOrigValue(kind);
-      // 读回期间松手 / 换了手势：这份读数作废，什么都别碰。
-      if (seq != _gestureSeq || _lockedKind != kind) return;
+      // 读回期间松手 / 换了手势 / 整个 controller 已 dispose：
+      // 这份读数作废，什么都别碰。
+      if (_disposed || seq != _gestureSeq || _lockedKind != kind) return;
       _origValue = orig;
       _origValueReady = true;
     }
@@ -232,6 +246,7 @@ class NiumaGestureController {
 
   /// pan 结束 → 水平 seek 时提交拖动中算好的目标位置。
   void onPanEnd() {
+    if (_disposed) return;
     final target = _pendingSeekTarget;
     if (_lockedKind == GestureKind.horizontalSeek && target != null) {
       player.seekTo(target);
@@ -243,8 +258,11 @@ class NiumaGestureController {
   }
 
   /// 释放：停 HUD 计时器、释放 [feedback] notifier，并把亮度恢复到
-  /// [initBrightness] 读到的初值。
+  /// [initBrightness] 读到的初值。幂等；此后所有手势入口与在途异步回调
+  /// （亮度 / 音量读数、HUD 隐藏 Timer）都不再触碰已释放的 notifier。
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     _hideTimer?.cancel();
     restoreBrightness();
     _feedback.dispose();

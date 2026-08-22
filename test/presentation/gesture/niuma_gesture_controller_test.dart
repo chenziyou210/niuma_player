@@ -237,4 +237,44 @@ void main() {
         reason: '基准被旧手势迟到的 0.9 覆盖了');
     await controller.dispose();
   });
+
+  test('拖动中 dispose：迟到的亮度读数不得触碰已释放的 feedback notifier', () async {
+    final (controller, backend, g) = await build();
+    backend.gateBrightness = true;
+
+    g.onPanStart(const Offset(50, 150));
+    final update = g.onPanUpdate(const Offset(50, 30), size); // 卡在 getBrightness
+
+    // 页面销毁：拖动进行中直接 dispose 手势 controller。
+    g.dispose();
+
+    // 迟到的读数此刻才回来——此前会 _showHud 触碰已 dispose 的 ValueNotifier
+    // 抛 "used after being disposed"。
+    backend.brightnessGates.single.complete();
+    await update;
+
+    expect(backend.brightnessSets, isEmpty,
+        reason: 'dispose 之后不得再动系统亮度');
+    await controller.dispose();
+  });
+
+  test('dispose 幂等；dispose 后手势入口全部安全空操作，不再排程 HUD 计时器',
+      () async {
+    final (controller, backend, g) = await build();
+    g.dispose();
+    expect(g.dispose, returnsNormally, reason: 'dispose 必须幂等');
+
+    g.onDoubleTap(); // 此前会同步触碰已 dispose 的 notifier
+    g.onLongPressStart();
+    g.onLongPressEnd();
+    g.onPanStart(const Offset(50, 150));
+    await g.onPanUpdate(const Offset(50, 30), size);
+    g.onPanEnd(); // 此前会新建 600ms 隐藏计时器，之后触碰已释放的 notifier
+
+    // 给潜在的隐藏计时器开火窗口：不得有 uncaught error。
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    expect(backend.brightnessSets, isEmpty);
+    expect(backend.lastSeek, isNull);
+    await controller.dispose();
+  });
 }
