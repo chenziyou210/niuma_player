@@ -50,6 +50,29 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`NiumaPlayerValue.structuralRevision` + `structurallyEquals`**（kit
+  的 `structuralRevision` 下沉）：controller 在 value setter 单点盖章的
+  结构版号——除 `position` / `bufferedPosition` 外任意字段变化时递增，
+  播放 tick 不递增。上层判断"骨架 UI 要不要重建"只需比较版号，不必自己
+  维护逐字段清单（kit 此前手工维护 8 字段列表，内核加字段就会漏通知）；
+  "哪些字段算结构"的唯一事实源是 `structurallyEquals`，逐字段矩阵单测
+  兜底。backend 自产 value 版号恒为 0，仅经 controller 流出的携带有效版号。
+- **内核结构化错误分类**（kit ROADMAP 2.4 "分类形同虚设"）：
+  - IJK 路径：Kotlin `PlayerSession` 本就回传结构化 `errorCategory`，但
+    `NativeBackend` 的 initialize 失败路径把它重新包成裸
+    `PlatformException`（分类只剩 message 文本里的 `category=network`
+    字样）——现在直接以携带分类的 `PlayerError` 失败，`_categorize` 的
+    duck-typing 现成吃到；prepare 无进度超时同样归 network（对齐
+    initTimeout → TimeoutException 的可重试语义，此前落 unknown 不重试）。
+  - vp 主路径：新增内核统一的平台错误模式表
+    （`platform_error_classifier`，配真机串样本单测）——Exo
+    `Source error` / HTTP 栈 / DNS / 超时与 iOS `NSURLErrorDomain`
+    归 network，解码器失败归 codecUnsupported（优先匹配）；作用于
+    `value.error.category` 与 initialize 失败的 `_categorize` 两条路。
+    Android 真机断网实测串此前双双落 unknown：**断网连重试都不触发**，
+    kit 分类文案退化为通用兜底。kit / 业务侧不要再做文本嗅探。
+  - `FallbackTriggered.errorCategory` 开始携带归类结果（此前字段恒 null）。
+  - `PlayerError` 现在 `implements Exception`（可作为异常抛出的语义显式化）。
 - `PipStartFailed(reason)` 事件：iOS PiP 启动失败（AVKit `failedToStart` 或
   等 `isPictureInPicturePossible` 5s 超时）时原生侧推送，controller 据此把
   `enterPictureInPicture()` 乐观置位的 `isInPictureInPicture` 翻回 false
