@@ -9,6 +9,7 @@ import 'package:niuma_player/src/domain/data_source.dart';
 import 'package:niuma_player/src/domain/player_backend.dart';
 import 'package:niuma_player/src/domain/player_state.dart';
 import 'package:niuma_player/src/data/_pip_event_bus.dart';
+import 'package:niuma_player/src/data/platform_error_classifier.dart';
 
 /// 包装 `package:video_player` 的 [PlayerBackend] 实现。
 class VideoPlayerBackend extends PlayerBackend {
@@ -142,10 +143,13 @@ class VideoPlayerBackend extends PlayerBackend {
     final buffered = v.buffered.isEmpty ? Duration.zero : v.buffered.last.end;
     _userWantsPlay = nextUserWantsPlay(_userWantsPlay, v);
     final phase = derivePhaseFor(v, userWantsPlay: _userWantsPlay);
-    // video_player 只有自由格式 errorDescription，包成 unknown 分类。
+    // video_player 只有自由格式 errorDescription：过内核的平台错误模式表
+    // 尽力归类（Exo "Source error" → network 等），认不出保持 unknown。
     final PlayerError? playerError = v.hasError
         ? PlayerError(
-            category: PlayerErrorCategory.unknown,
+            category:
+                classifyPlatformErrorText(message: v.errorDescription) ??
+                    PlayerErrorCategory.unknown,
             message: v.errorDescription ?? 'video_player error',
           )
         : null;

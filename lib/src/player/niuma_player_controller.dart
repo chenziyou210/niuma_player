@@ -6,6 +6,7 @@ import 'package:niuma_player/src/capabilities/niuma_capabilities.dart';
 import 'package:niuma_player/src/data/_pip_event_bus.dart'
     show adoptOrphanedPipSession;
 import 'package:niuma_player/src/data/default_backend_factory.dart';
+import 'package:niuma_player/src/data/platform_error_classifier.dart';
 import 'package:niuma_player/src/data/default_platform_bridge.dart';
 import 'package:niuma_player/src/domain/backend_factory.dart';
 import 'package:niuma_player/src/domain/data_source.dart';
@@ -265,7 +266,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   }
 
   /// 把异常分类成 [PlayerErrorCategory]；带 `.category` getter 的对象
-  /// duck-typing 分类，测试类无需在生产代码可见。
+  /// duck-typing 分类，测试类无需在生产代码可见。都取不到时走内核的平台
+  /// 错误模式表（vp 主路径抛的 `PlatformException` 只有自由文本——此前
+  /// 全部落 unknown，断网连重试都不触发）。
   PlayerErrorCategory _categorize(Object e) {
     if (e is EngineFallbackFailure) return _categorize(e.fallback);
     if (e is TimeoutException) return PlayerErrorCategory.network;
@@ -276,7 +279,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     } catch (_) {
       // 不是带分类的异常
     }
-    return PlayerErrorCategory.unknown;
+    return classifyThrownPlatformError(e) ?? PlayerErrorCategory.unknown;
   }
 
   /// 按 [retryPolicy] 带重试地运行 [bringUp]；不可重试时 rethrow 交给调用方。
@@ -326,6 +329,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         _emit(FallbackTriggered(
           FallbackReason.error,
           errorCode: vpError.toString(),
+          errorCategory: _categorize(vpError),
         ));
         await _disposeCurrentBackend();
         // IJK 兜底播的是默认线路。
@@ -503,6 +507,11 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 避免每次 position 更新都发 method channel。
   bool? _lastPipActionsIsPlaying;
 
+  /// 结构版号计数器，见 [NiumaPlayerValue.structuralRevision]。
+  /// 在 value setter 单点盖章，字段清单的唯一事实源是
+  /// [NiumaPlayerValue.structurallyEquals]。
+  int _structuralRevision = 0;
+
   bool _holdsWakelock = false;
 
   /// playing 边沿同步屏幕常亮；进程级计数归并多实例，
@@ -528,7 +537,13 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   set value(NiumaPlayerValue newValue) {
     final wasPlaying = value.isPlaying;
     final wasInPip = value.isInPictureInPicture;
-    super.value = newValue;
+    // 结构版号单点盖章：backend 自产 value 恒为 0，这里按"结构字段是否
+    // 变化"递增后盖上——播放 tick（仅进度变化）版号不动，上层比较版号
+    // 即可跳过骨架重建，不必逐字段 diff。
+    if (!newValue.structurallyEquals(value)) _structuralRevision++;
+    super.value = newValue.structuralRevision == _structuralRevision
+        ? newValue
+        : newValue.copyWith(structuralRevision: _structuralRevision);
     if (!_candidateBringUpInFlight) {
       _stablePosition = newValue.position;
       // 用播放意图而非"正在出帧"：buffering 也是用户想播，切换 / 回滚后
@@ -782,6 +797,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         _emit(FallbackTriggered(
           FallbackReason.error,
           errorCode: vpError.toString(),
+          errorCategory: _categorize(vpError),
         ));
         await _disposeCurrentBackend();
         await _initNativeAfterVpFailure(target.source, epoch, vpError);

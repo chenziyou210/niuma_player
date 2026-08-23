@@ -137,8 +137,12 @@ class NativeBackend extends PlayerBackend {
       final elapsed = _prepareStartedAt == null
           ? Duration.zero
           : DateTime.now().difference(_prepareStartedAt!);
+      // network 分类：与 controller 的 initTimeout → TimeoutException →
+      // network 对齐——无进度超时按可重试处理（此前裸 PlatformException
+      // 落 unknown，smart 策略不重试）。
       _preparedCompleter.completeError(
-        PlatformException(
+        PlayerError(
+          category: PlayerErrorCategory.network,
           code: 'native_prepare_timeout',
           message:
               'Native prepare stalled for ${_prepareNoProgressTimeout.inSeconds}s '
@@ -226,11 +230,17 @@ class NativeBackend extends PlayerBackend {
     // 一旦 native 离开 opening 阶段就 settle prepare completer。
     if (!_preparedCompleter.isCompleted) {
       if (phase == PlayerPhase.error) {
+        // 直接用上面构好的 PlayerError：Kotlin 侧的结构化 errorCategory
+        // 已经还原在里面。此前这里重新包裸 PlatformException，把分类扔进
+        // message 文本，controller 的 _categorize 取不到 → 全部落 unknown，
+        // 断网也不重试（真机断网实测的根因）。
         _preparedCompleter.completeError(
-          PlatformException(
-            code: errorCode ?? 'native_error',
-            message: errorMessage ?? 'native error before first frame',
-          ),
+          playerError ??
+              PlayerError(
+                category: PlayerErrorCategory.unknown,
+                message: errorMessage ?? 'native error before first frame',
+                code: errorCode,
+              ),
         );
       } else if (phase != PlayerPhase.idle && phase != PlayerPhase.opening) {
         _preparedCompleter.complete();

@@ -41,8 +41,11 @@ class EngineFallbackFailure implements Exception {
 
 /// `phase == error` 时附在 [NiumaPlayerValue] 上的结构化错误，
 /// 消费方直接 switch [category]，不必模式匹配信息文本。
+///
+/// 也可作为异常抛出（backend 的 initialize 失败路径用它携带结构化分类，
+/// controller 的重试 / 回退决策按 [category] 走）。
 @immutable
-class PlayerError {
+class PlayerError implements Exception {
   const PlayerError({
     required this.category,
     required this.message,
@@ -116,6 +119,7 @@ class NiumaPlayerValue {
     this.playbackSpeed = 1.0,
     this.isInPictureInPicture = false,
     this.isPictureInPictureSupported = false,
+    this.structuralRevision = 0,
   });
 
   /// 空初始值（[PlayerBackend.initialize] 之前）。
@@ -150,6 +154,30 @@ class NiumaPlayerValue {
   /// 设备 + 当前视频是否支持 PiP（iOS 15+ / Android 8.0+，且已 initialize）。
   /// initialize 前为 false。
   final bool isPictureInPictureSupported;
+
+  /// 结构版号：由 [NiumaPlayerController] 单点盖章，**结构字段**（除
+  /// [position] / [bufferedPosition] 之外的任意字段，见 [structurallyEquals]）
+  /// 变化时递增。上层要判断"骨架 UI 需不需要重建"，比较
+  /// `old.structuralRevision != new.structuralRevision` 即可——不必（也不要）
+  /// 自己维护字段清单：内核加字段时清单在这里同步，消费方零改动。
+  ///
+  /// backend 自产的 value 恒为 0；只有经 controller 流出的 value 携带
+  /// 有效版号。播放 tick（仅进度变化）不递增。
+  final int structuralRevision;
+
+  /// 与 [other] 的**结构字段**是否全部相等——即除高频进度字段
+  /// （[position] / [bufferedPosition]）与 [structuralRevision] 本身外的
+  /// 全部字段。**这是"哪些字段算结构"的唯一事实源**；给本类新增字段时
+  /// 必须同步更新这里（`structural_revision_test` 的逐字段矩阵是兜底闸）。
+  bool structurallyEquals(NiumaPlayerValue other) =>
+      other.phase == phase &&
+      other.duration == duration &&
+      other.size == size &&
+      other.openingStage == openingStage &&
+      other.error == error &&
+      other.playbackSpeed == playbackSpeed &&
+      other.isInPictureInPicture == isInPictureInPicture &&
+      other.isPictureInPictureSupported == isPictureInPictureSupported;
 
   // ────────────── 兼容性 getter（由 phase 派生） ──────────────
 
@@ -192,6 +220,7 @@ class NiumaPlayerValue {
     double? playbackSpeed,
     bool? isInPictureInPicture,
     bool? isPictureInPictureSupported,
+    int? structuralRevision,
   }) {
     return NiumaPlayerValue(
       phase: phase ?? this.phase,
@@ -206,6 +235,7 @@ class NiumaPlayerValue {
       isInPictureInPicture: isInPictureInPicture ?? this.isInPictureInPicture,
       isPictureInPictureSupported:
           isPictureInPictureSupported ?? this.isPictureInPictureSupported,
+      structuralRevision: structuralRevision ?? this.structuralRevision,
     );
   }
 
@@ -222,7 +252,8 @@ class NiumaPlayerValue {
         other.error == error &&
         other.playbackSpeed == playbackSpeed &&
         other.isInPictureInPicture == isInPictureInPicture &&
-        other.isPictureInPictureSupported == isPictureInPictureSupported;
+        other.isPictureInPictureSupported == isPictureInPictureSupported &&
+        other.structuralRevision == structuralRevision;
   }
 
   @override
@@ -237,6 +268,7 @@ class NiumaPlayerValue {
         playbackSpeed,
         isInPictureInPicture,
         isPictureInPictureSupported,
+        structuralRevision,
       );
 
   @override
@@ -251,7 +283,8 @@ class NiumaPlayerValue {
         'error: $error, '
         'playbackSpeed: $playbackSpeed, '
         'isInPictureInPicture: $isInPictureInPicture, '
-        'isPictureInPictureSupported: $isPictureInPictureSupported)';
+        'isPictureInPictureSupported: $isPictureInPictureSupported, '
+        'structuralRevision: $structuralRevision)';
   }
 }
 
