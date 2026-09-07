@@ -7,6 +7,7 @@ import 'dart:ui_web' as ui_web;
 import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;
 
+import 'package:niuma_player/src/data/buffered_range.dart';
 import 'package:niuma_player/src/data/hls_detect.dart';
 import 'package:niuma_player/src/data/web_media_readiness.dart';
 import 'package:niuma_player/src/domain/data_source.dart';
@@ -157,6 +158,17 @@ class WebVideoBackend extends PlayerBackend {
     _valueController.add(v);
   }
 
+  /// `<video>.buffered` → 包含当前位置那段区间的末尾，见 [bufferedEndAt]。
+  Duration _bufferedPosition() {
+    final buf = _video.buffered;
+    Duration secs(double v) => Duration(milliseconds: (v * 1000).round());
+    final ranges = <BufferedRange>[
+      for (var i = 0; i < buf.length; i++)
+        (start: secs(buf.start(i)), end: secs(buf.end(i))),
+    ];
+    return bufferedEndAt(ranges, secs(_video.currentTime));
+  }
+
   void _setPhase(PlayerPhase phase,
       {PlayerError? error, bool clearError = false}) {
     final next = _value.copyWith(
@@ -254,23 +266,26 @@ class WebVideoBackend extends PlayerBackend {
         }
       }
     });
-    // position 与 buffered 同拍更新（progress event 暴露不一致），
-    // 单次 _emit 避免每 tick 广播两遍。
+    // position 与 buffered 同拍更新，单次 _emit 避免每 tick 广播两遍。
     _on('timeupdate', () {
       if (_disposed) return;
-      final buf = _video.buffered;
       _emit(_value.copyWith(
         position: Duration(
           milliseconds: (_video.currentTime * 1000).round(),
         ),
-        bufferedPosition: buf.length == 0
-            ? null
-            : Duration(
-                milliseconds: (buf.end(buf.length - 1) * 1000).round(),
-              ),
+        bufferedPosition: _bufferedPosition(),
       ));
       if (_value.size.width <= 0 || _value.size.height <= 0) {
         _maybeUpdateSize();
+      }
+    });
+    // 暂停时没有 timeupdate，但下载仍在继续；靠 progress 让缓冲值跟着长，
+    // 否则灰条要等恢复播放才跳一下。
+    _on('progress', () {
+      if (_disposed) return;
+      final buffered = _bufferedPosition();
+      if (buffered != _value.bufferedPosition) {
+        _emit(_value.copyWith(bufferedPosition: buffered));
       }
     });
     _on('ended', () {

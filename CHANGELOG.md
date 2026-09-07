@@ -81,6 +81,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`bufferedPosition` 取「包含当前位置的那段」缓冲区间的末尾，不再取最后
+  一段**：浏览器 / AVPlayer 会保留 seek 前后的多段区间，拖到后面再拖回开头后，
+  web 与 video_player 后端此前都取末段末尾，播到 16 秒进度条的缓冲段却铺到
+  8 分钟。现改为取包含当前位置的那段（相接的小缝隙视为连续），没有一段包含
+  当前位置时等于当前位置。web 后端另外监听 `progress`，暂停期间缓冲值也会
+  跟着增长，不再等恢复播放才更新。
 - **并发竞态第四轮收口（复审跟进）。**
   - **PiP 能力查询不再阻塞 `initialize()` 完成**（best-effort，`unawaited`，
     查询自带 backend 身份复查）：此前查询挡在 complete 之前，`dispose()` /

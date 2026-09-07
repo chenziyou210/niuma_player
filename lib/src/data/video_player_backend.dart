@@ -9,6 +9,7 @@ import 'package:niuma_player/src/domain/data_source.dart';
 import 'package:niuma_player/src/domain/player_backend.dart';
 import 'package:niuma_player/src/domain/player_state.dart';
 import 'package:niuma_player/src/data/_pip_event_bus.dart';
+import 'package:niuma_player/src/data/buffered_range.dart';
 import 'package:niuma_player/src/data/platform_error_classifier.dart';
 
 /// 包装 `package:video_player` 的 [PlayerBackend] 实现。
@@ -140,7 +141,12 @@ class VideoPlayerBackend extends PlayerBackend {
   void _onInnerChanged() {
     if (_disposed) return;
     final v = _inner.value;
-    final buffered = v.buffered.isEmpty ? Duration.zero : v.buffered.last.end;
+    // 取包含当前位置那段区间的末尾，不是最后一段：seek 前后多段并存时
+    // 「最后一段」可能远在前方，灰条会虚高。见 bufferedEndAt。
+    final buffered = bufferedEndAt(
+      [for (final r in v.buffered) (start: r.start, end: r.end)],
+      v.position,
+    );
     _userWantsPlay = nextUserWantsPlay(_userWantsPlay, v);
     final phase = derivePhaseFor(v, userWantsPlay: _userWantsPlay);
     // video_player 只有自由格式 errorDescription：过内核的平台错误模式表
