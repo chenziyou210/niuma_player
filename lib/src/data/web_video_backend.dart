@@ -85,8 +85,14 @@ class WebVideoBackend extends PlayerBackend {
   /// 播放意图：DOM reparent 导致浏览器自发暂停时据此自动续播。
   bool _intendedPlaying = false;
 
-  /// iOS Safari 系统全屏 player 期间为 true——期间不做暂停自愈。
+  /// 原生全屏（含请求在途）期间强制提供可交互控件，不做暂停自愈。
   bool _inNativeFullscreen = false;
+  bool _usingWebkitFullscreen = false;
+  bool _webkitFullscreenExiting = false;
+  bool _standardFullscreenActive = false;
+  bool _nativeControlsRequested = false;
+  int _fullscreenEpoch = 0;
+  Future<bool>? _fullscreenRequest;
 
   /// Rapid seek 合并（latest-wins），防反复 seek 卡死 hls.js SourceBuffer。
   bool _isSeeking = false;
@@ -210,6 +216,25 @@ class WebVideoBackend extends PlayerBackend {
   }
 
   void _attachListeners() {
+    final fullscreenListener = ((web.Event _) {
+      if (_disposed || !_inNativeFullscreen || _usingWebkitFullscreen) return;
+      if (_ownsStandardFullscreen) {
+        _standardFullscreenActive = true;
+      } else if (_standardFullscreenActive) {
+        // 只收尾本实例拥有的全屏；别的元素进入/退出不影响本实例。
+        _finishNativeFullscreen();
+      }
+    }).toJS;
+    web.document.addEventListener('fullscreenchange', fullscreenListener);
+    _listenerRemovers.add(() => web.document
+        .removeEventListener('fullscreenchange', fullscreenListener));
+    _on('webkitendfullscreen', () {
+      if (_disposed || !_inNativeFullscreen || !_usingWebkitFullscreen) return;
+      final resumePlay = _intendedPlaying;
+      _finishNativeFullscreen();
+      // 尊重全屏中最新的暂停意图，不用进入前的播放快照强制续播。
+      if (resumePlay && _video.paused) unawaited(play());
+    });
     _on('loadedmetadata', () {
       _maybeMarkInitialized();
       _maybeUpdateSize();
@@ -221,12 +246,18 @@ class WebVideoBackend extends PlayerBackend {
     });
     _on('play', () {
       if (_disposed) return;
+      // 原生控件绕过 backend.play()；只接受当前仍在播放的事件，
+      // 避免排队中的旧 play 覆盖用户刚执行的 pause 意图。
+      if (!_video.paused) _intendedPlaying = true;
       _setPhase(PlayerPhase.playing);
     });
     _on('pause', () {
       if (_disposed) return;
       // ended 后也会触发 pause，避免覆盖 ended phase。
       if (_value.phase == PlayerPhase.ended) return;
+      // 原生控件会绕过 backend.pause()；优先尊重其暂停，不能把用户操作
+      // 当作 DOM 搬迁后自动续播。关闭原生控件时仍保留既有搬迁自愈。
+      if (_video.controls) _intendedPlaying = false;
       // DOM reparent（全屏搬迁）会让浏览器自发暂停：意图仍在播、
       // 非系统全屏且页面可见时自动续播，不对外 emit paused。
       if (_intendedPlaying && !_inNativeFullscreen && !web.document.hidden) {
@@ -300,8 +331,9 @@ class WebVideoBackend extends PlayerBackend {
       // 不得把新源打成 error。
       if (mediaError == null) return;
       final code = mediaError.code;
-      final msg =
-          mediaError.message.isEmpty ? 'unknown video error' : mediaError.message;
+      final msg = mediaError.message.isEmpty
+          ? 'unknown video error'
+          : mediaError.message;
       PlayerErrorCategory cat;
       switch (code) {
         case 1: // MEDIA_ERR_ABORTED
@@ -330,7 +362,6 @@ class WebVideoBackend extends PlayerBackend {
         c.completeError(err);
       }
     });
-
   }
 
   /// 同步返回本代 completer 的 future：hls.js 的异步加载在后台进行，这样
@@ -446,10 +477,26 @@ class WebVideoBackend extends PlayerBackend {
 
   /// 浏览器禁止 JS 设置的 forbidden request headers，设置会抛异常。
   static const Set<String> _forbiddenRequestHeaders = <String>{
-    'accept-charset', 'accept-encoding', 'access-control-request-headers',
-    'access-control-request-method', 'connection', 'content-length', 'cookie',
-    'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive', 'origin',
-    'referer', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'user-agent',
+    'accept-charset',
+    'accept-encoding',
+    'access-control-request-headers',
+    'access-control-request-method',
+    'connection',
+    'content-length',
+    'cookie',
+    'cookie2',
+    'date',
+    'dnt',
+    'expect',
+    'host',
+    'keep-alive',
+    'origin',
+    'referer',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'user-agent',
     'via',
   };
 
@@ -574,60 +621,113 @@ class WebVideoBackend extends PlayerBackend {
   @override
   Future<void> setWebNativeControls(bool show) async {
     if (_disposed) return;
+    _nativeControlsRequested = show;
+    _applyNativeControls();
+  }
+
+  void _applyNativeControls() {
+    final show = _inNativeFullscreen || _nativeControlsRequested;
     _video.controls = show;
+    final pointerEvents = show ? 'auto' : 'none';
+    _video.style.setProperty('pointer-events', pointerEvents);
+    _wrapper.style.setProperty('pointer-events', pointerEvents);
+  }
+
+  bool get _ownsStandardFullscreen {
+    // 元素位于 ShadowRoot 时 document 返回宿主，实际归属需读所在根节点。
+    final root = _video.getRootNode() as JSObject;
+    return web.document.fullscreenElement == _video ||
+        root.getProperty<JSAny?>('fullscreenElement'.toJS) == _video;
+  }
+
+  void _finishNativeFullscreen() {
+    _fullscreenEpoch++;
+    _fullscreenRequest = null;
+    _inNativeFullscreen = false;
+    _usingWebkitFullscreen = false;
+    _webkitFullscreenExiting = false;
+    _standardFullscreenActive = false;
+    _applyNativeControls();
   }
 
   @override
-  Future<bool> enterNativeFullscreen() async {
-    if (_disposed) return false;
-    // iOS Safari 不支持 requestFullscreen，只能 webkitEnterFullscreen
-    // 进系统 player；其余浏览器走标准 API。
+  Future<bool> enterNativeFullscreen() {
+    if (_disposed || _webkitFullscreenExiting) return Future<bool>.value(false);
+    final pending = _fullscreenRequest;
+    if (pending != null) return pending;
+    if (_inNativeFullscreen) return Future<bool>.value(true);
+    // 调用浏览器 API 前不 await，保留按钮点击带来的用户激活权限。
+    final request = _enterNativeFullscreen();
+    _fullscreenRequest = request;
+    unawaited(request.then((_) {
+      if (identical(_fullscreenRequest, request)) _fullscreenRequest = null;
+    }));
+    return request;
+  }
+
+  Future<bool> _enterNativeFullscreen() async {
+    final epoch = ++_fullscreenEpoch;
+    _inNativeFullscreen = true;
+    _applyNativeControls();
+    // iOS Safari 不支持 requestFullscreen，只能进系统 player。
     try {
       final v = _video as JSObject;
       if (v.has('webkitEnterFullscreen')) {
-        final wasPlaying = !_video.paused;
-        _inNativeFullscreen = true;
-        _listenWebkitEndFullscreenOnce(resumePlay: wasPlaying);
+        _usingWebkitFullscreen = true;
         v.callMethod('webkitEnterFullscreen'.toJS);
-        return true;
+        return !_disposed && epoch == _fullscreenEpoch;
       }
     } catch (_) {/* 落到标准 API */}
+    _usingWebkitFullscreen = false;
     try {
       await _video.requestFullscreen().toDart;
+      if (_disposed || epoch != _fullscreenEpoch) {
+        // 退出/销毁发生在请求完成前：只释放这个迟到请求的全屏，
+        // 若已有新请求接管同一个元素则留给新请求处理。
+        if (!_inNativeFullscreen && _ownsStandardFullscreen) {
+          await web.document.exitFullscreen().toDart;
+        }
+        return false;
+      }
+      if (!_ownsStandardFullscreen) {
+        _finishNativeFullscreen();
+        return false;
+      }
+      _standardFullscreenActive = true;
       return true;
     } catch (_) {
+      if (!_disposed && epoch == _fullscreenEpoch) {
+        // 被取消的旧请求可能刚好成功：若新请求仍要全屏且元素已经就位，
+        // 接管实际全屏，避免新 API 拒绝后留下无控件的全屏画面。
+        if (_ownsStandardFullscreen) {
+          _standardFullscreenActive = true;
+          return true;
+        }
+        _finishNativeFullscreen();
+      }
       return false;
     }
-  }
-
-  /// 退出 iOS 系统 player 后按需恢复播放——iOS 退出时默认会把 video 暂停。
-  void _listenWebkitEndFullscreenOnce({required bool resumePlay}) {
-    late final JSFunction cb;
-    cb = ((web.Event _) {
-      _video.removeEventListener('webkitendfullscreen', cb);
-      _inNativeFullscreen = false;
-      if (_disposed || !resumePlay) return;
-      unawaited(play());
-    }).toJS;
-    _video.addEventListener('webkitendfullscreen', cb);
   }
 
   @override
   Future<bool> exitNativeFullscreen() async {
     if (_disposed) return false;
+    final epoch = _fullscreenEpoch;
     try {
-      final v = _video as JSObject;
-      if (v.has('webkitExitFullscreen')) {
-        v.callMethod('webkitExitFullscreen'.toJS);
+      if (_inNativeFullscreen && _usingWebkitFullscreen) {
+        if (_webkitFullscreenExiting) return true;
+        _webkitFullscreenExiting = true;
+        (_video as JSObject).callMethod('webkitExitFullscreen'.toJS);
+        // WebKit 的结束事件异步到达；此前拒绝再次进入，防旧事件收尾新会话。
+        // 不排队延迟进入，否则会丢失点击产生的用户激活权限。
         return true;
-      }
-    } catch (_) {/* 落到标准 API */}
-    try {
-      if (web.document.fullscreenElement != null) {
+      } else if (_ownsStandardFullscreen) {
         await web.document.exitFullscreen().toDart;
       }
+      if (epoch == _fullscreenEpoch) _finishNativeFullscreen();
       return true;
     } catch (_) {
+      if (epoch == _fullscreenEpoch) _webkitFullscreenExiting = false;
       return false;
     }
   }
@@ -636,6 +736,21 @@ class WebVideoBackend extends PlayerBackend {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // 先请求退出本实例已持有的全屏，再释放媒体资源；失败不阻断销毁。
+    Future<void>? fullscreenExit;
+    try {
+      if (_inNativeFullscreen && _usingWebkitFullscreen) {
+        if (!_webkitFullscreenExiting) {
+          (_video as JSObject).callMethod('webkitExitFullscreen'.toJS);
+        }
+      } else if (_ownsStandardFullscreen) {
+        fullscreenExit = web.document.exitFullscreen().toDart.then<void>(
+              (_) {},
+              onError: (_) {},
+            );
+      }
+    } catch (_) {/* 浏览器拒绝退出时仍需释放监听与资源 */}
+    _finishNativeFullscreen();
     // 让仍挂着的 initialize future 立刻失败。
     final c = _initCompleter;
     if (c != null && !c.isCompleted) {
@@ -656,6 +771,7 @@ class WebVideoBackend extends PlayerBackend {
     _video.load();
     await _valueController.close();
     await _eventController.close();
+    await fullscreenExit;
   }
 }
 

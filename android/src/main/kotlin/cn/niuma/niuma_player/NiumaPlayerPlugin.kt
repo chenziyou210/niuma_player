@@ -40,6 +40,7 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
     private var messenger: BinaryMessenger? = null
     private var textureRegistry: TextureRegistry? = null
     private var applicationContext: Context? = null
+    private var flutterAssets: FlutterPlugin.FlutterAssets? = null
     private var activityBinding: ActivityPluginBinding? = null
 
     private val players: MutableMap<Long, PlayerSession> = mutableMapOf()
@@ -77,6 +78,7 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         messenger = flutterPluginBinding.binaryMessenger
         textureRegistry = flutterPluginBinding.textureRegistry
         applicationContext = flutterPluginBinding.applicationContext
+        flutterAssets = flutterPluginBinding.flutterAssets
 
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "cn.niuma/player")
         channel.setMethodCallHandler(this)
@@ -171,6 +173,7 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        flutterAssets = null
         if (::pipChannel.isInitialized) {
             pipChannel.setMethodCallHandler(null)
         }
@@ -392,8 +395,12 @@ class NiumaPlayerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
             val useAndroidPlatformView =
                 call.argument<Boolean>("useAndroidPlatformView") ?: false
 
+            // Dart asset source 是 Flutter key，并不是 APK 内路径或文件 URI。
+            val resolvedUri = if (type == "asset") {
+                checkNotNull(flutterAssets).getAssetFilePathByName(uri)
+            } else uri
             val dataSource = mapOf<String, Any?>(
-                "uri" to uri,
+                "uri" to resolvedUri,
                 "type" to type,
                 "headers" to headers
             )

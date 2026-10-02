@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform, visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
@@ -42,9 +43,10 @@ class VideoPlayerBackend extends PlayerBackend {
   /// `package:video_player` 的 `VideoPlayer` widget。
   VideoPlayerController get innerController => _inner;
 
-  late final VideoViewType _viewType = useAndroidPlatformView && Platform.isAndroid
-      ? VideoViewType.platformView
-      : VideoViewType.textureView;
+  late final VideoViewType _viewType =
+      useAndroidPlatformView && Platform.isAndroid
+          ? VideoViewType.platformView
+          : VideoViewType.textureView;
 
   /// platformView 路径下底层 ExoPlayer 的输出 surface 是独占资源——同一
   /// player 同时只能绑一个 SurfaceView，所以同一时刻只允许一份渲染 widget
@@ -153,9 +155,8 @@ class VideoPlayerBackend extends PlayerBackend {
     // 尽力归类（Exo "Source error" → network 等），认不出保持 unknown。
     final PlayerError? playerError = v.hasError
         ? PlayerError(
-            category:
-                classifyPlatformErrorText(message: v.errorDescription) ??
-                    PlayerErrorCategory.unknown,
+            category: classifyPlatformErrorText(message: v.errorDescription) ??
+                PlayerErrorCategory.unknown,
             message: v.errorDescription ?? 'video_player error',
           )
         : null;
@@ -337,11 +338,23 @@ class VideoPlayerBackend extends PlayerBackend {
     }
   }
 
-  /// iOS PiP 的 stock 控件由 AVKit 自动同步——已知不需要做事，显式 no-op。
+  /// Android 的 RemoteAction 需显式同步；iOS 由 AVKit 自动更新。
   @override
   Future<void> updatePictureInPictureActions({
     required bool isPlaying,
-  }) async {}
+  }) async {
+    if (_disposed || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _pipChannel.invokeMethod<void>(
+        'updatePictureInPictureActions',
+        <String, dynamic>{'isPlaying': isPlaying},
+      );
+    } on PlatformException {
+      // PiP 控件更新是 best-effort，不影响媒体播放。
+    } on MissingPluginException {
+      // 引擎或 Activity 已拆卸。
+    }
+  }
 
   @override
   Future<void> dispose() async {

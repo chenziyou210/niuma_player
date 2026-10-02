@@ -44,6 +44,40 @@ void main() {
   final srcB = NiumaDataSource.network('https://b');
   final srcC = NiumaDataSource.network('https://c');
 
+  test('切向 B 在途时再次选择 A：取消 B 并恢复 A 的位置和播放意图', () async {
+    final gate = _GateMiddleware()..hold(srcB.uri);
+    final factory = FakeBackendFactory();
+    final ctrl = NiumaPlayerController(
+      NiumaMediaSource.lines(lines: [
+        MediaLine(id: 'a', label: 'A', source: srcA),
+        MediaLine(id: 'b', label: 'B', source: srcB),
+      ], defaultLineId: 'a'),
+      middlewares: [gate],
+      retryPolicy: const RetryPolicy.none(),
+      platform: FakePlatformBridge(isIOS: true),
+      backendFactory: factory,
+    );
+    addTearDown(ctrl.dispose);
+    await ctrl.initialize();
+    factory.videoPlayers.single.emitValue(ctrl.value.copyWith(
+      phase: PlayerPhase.playing,
+      position: const Duration(seconds: 5),
+    ));
+    final toB = ctrl.switchLine('b');
+    final outcome = toB.then<Object?>((_) => null, onError: (Object e) => e);
+    await _settle();
+    await ctrl.switchLine('a');
+    gate.release(srcB.uri);
+    expect(await outcome, isA<StateError>());
+    expect(ctrl.activeLineId, 'a');
+    expect(
+        factory.videoPlayers.last.lastSeekTarget, const Duration(seconds: 5));
+    expect(factory.videoPlayers.last.playCalls, 1);
+    final count = factory.videoPlayers.length;
+    await ctrl.switchLine('a');
+    expect(factory.videoPlayers.length, count, reason: '稳定的同线路调用仍为 no-op');
+  });
+
   group('NiumaPlayerController 并发操作：后发操作必须压倒先发操作', () {
     test(
         'load() 打断卡在 middleware 的 initialize()：'
@@ -87,8 +121,7 @@ void main() {
       // 必须自己销毁——两种都不许留下活的平台播放器。
       final leakedStale = factory.videoPlayers
           .where((b) => b.source?.uri == srcA.uri && !b.disposed);
-      expect(leakedStale, isEmpty,
-          reason: '过期链不得留下未销毁的 backend，否则泄漏平台播放器');
+      expect(leakedStale, isEmpty, reason: '过期链不得留下未销毁的 backend，否则泄漏平台播放器');
 
       expect(events.whereType<BackendSelected>().length, 1,
           reason: '只有胜出的那条链可以宣布 BackendSelected');
@@ -141,8 +174,7 @@ void main() {
 
       final leakedB = factory.videoPlayers
           .where((b) => b.source?.uri == srcB.uri && !b.disposed);
-      expect(leakedB, isEmpty,
-          reason: '被压倒的 switchLine(b) 不得留下未销毁的 backend');
+      expect(leakedB, isEmpty, reason: '被压倒的 switchLine(b) 不得留下未销毁的 backend');
 
       expect(
         events.whereType<LineSwitched>().map((e) => e.toId).toList(),
@@ -227,8 +259,7 @@ void main() {
       await initOutcome;
       await _settle();
 
-      expect(first.loadedSources, isEmpty,
-          reason: '半初始化的 backend 不能被 load()');
+      expect(first.loadedSources, isEmpty, reason: '半初始化的 backend 不能被 load()');
       expect(first.disposed, isTrue, reason: '旧 backend 应随重建被销毁');
       expect((ctrl.backend! as FakePlayerBackend).source?.uri, srcB.uri);
       expect(factory.videoPlayers.length, 2, reason: '重建 = 造了第二个 backend');
@@ -236,8 +267,7 @@ void main() {
       await ctrl.dispose();
     });
 
-    test('同一 tick 内连续两次 load()：只留最后一个源的 backend，不多造、不泄漏',
-        () async {
+    test('同一 tick 内连续两次 load()：只留最后一个源的 backend，不多造、不泄漏', () async {
       final factory = FakeBackendFactory();
       final ctrl = NiumaPlayerController(
         NiumaMediaSource.single(srcC),
@@ -270,8 +300,7 @@ void main() {
   group('过期链醒来后的收尾不得伤及新链', () {
     test(
         'Android 单线路：initialize 被 load 压倒后才失败（不可重试）——'
-        '旧链不得 dispose 新链的 backend、不得兜底 IJK、不得上报 FallbackTriggered',
-        () async {
+        '旧链不得 dispose 新链的 backend、不得兜底 IJK、不得上报 FallbackTriggered', () async {
       final vpGateA = Completer<void>();
       final factory = FakeBackendFactory(
         makeVideoPlayer: (ds) => FakePlayerBackend(
@@ -307,8 +336,7 @@ void main() {
           reason: '过期链的失败收尾不得 dispose 新链刚挂上的 backend');
       expect(identical(ctrl.backend, backendB), isTrue,
           reason: '_backend 必须仍指向新链的 backend');
-      expect(factory.nativePlayers, isEmpty,
-          reason: '过期链不得再为旧源拉起 IJK 兜底');
+      expect(factory.nativePlayers, isEmpty, reason: '过期链不得再为旧源拉起 IJK 兜底');
       expect(events.whereType<FallbackTriggered>(), isEmpty,
           reason: '过期链的失败不是本次播放的失败');
       expect(ctrl.value.phase, isNot(PlayerPhase.error));
@@ -317,8 +345,7 @@ void main() {
       await ctrl.dispose();
     });
 
-    test('卡死在 middleware 的旧链不得吞掉新链 backend 的 error（按代际过滤候选）',
-        () async {
+    test('卡死在 middleware 的旧链不得吞掉新链 backend 的 error（按代际过滤候选）', () async {
       final gate = _GateMiddleware()..hold(srcA.uri);
       final factory = FakeBackendFactory();
       final ctrl = NiumaPlayerController(
@@ -400,8 +427,7 @@ void main() {
       await ctrl.dispose();
     });
 
-    test('switchLine 在"恢复播放"的 await 期间被压倒：不得事后补发 LineSwitched',
-        () async {
+    test('switchLine 在"恢复播放"的 await 期间被压倒：不得事后补发 LineSwitched', () async {
       final playGateB = Completer<void>();
       final factory = FakeBackendFactory(
         makeVideoPlayer: (ds) => FakePlayerBackend(
@@ -435,8 +461,8 @@ void main() {
 
       // c 压倒 b 并完成。
       await ctrl.switchLine('c');
-      expect(events.whereType<LineSwitched>().map((e) => e.toId).toList(),
-          ['c']);
+      expect(
+          events.whereType<LineSwitched>().map((e) => e.toId).toList(), ['c']);
 
       // b 此刻才从 play() 回来：不得补一条 LineSwitched(b)。
       playGateB.complete();
@@ -456,8 +482,7 @@ void main() {
   });
 
   group('终局失败与迟到回调的清理', () {
-    test('初始化终局失败后：失败候选必须被摘除销毁，迟到的 ready 不得覆盖 error',
-        () async {
+    test('初始化终局失败后：失败候选必须被摘除销毁，迟到的 ready 不得覆盖 error', () async {
       final initGate = Completer<void>();
       final factory = FakeBackendFactory(
         makeVideoPlayer: (_) => FakePlayerBackend(
@@ -517,8 +542,7 @@ void main() {
       await _settle();
       // 查询是 best-effort：拉起成功即完成 initialize，不等 method channel
       // 往返——否则 dispose / switchLine 打断查询后旧 initialize 反而成功。
-      expect(initDone, isTrue,
-          reason: 'PiP 能力查询不得把 initialize 的完成挡在自己身后');
+      expect(initDone, isTrue, reason: 'PiP 能力查询不得把 initialize 的完成挡在自己身后');
 
       await ctrl.load(NiumaMediaSource.single(srcB)); // B 的查询立即返回 false
       expect(ctrl.value.isPictureInPictureSupported, isFalse);
@@ -532,8 +556,7 @@ void main() {
       await ctrl.dispose();
     });
 
-    test('dispose 时 PiP 查询在途：initialize 已在 dispose 前完成，迟到结果安全丢弃',
-        () async {
+    test('dispose 时 PiP 查询在途：initialize 已在 dispose 前完成，迟到结果安全丢弃', () async {
       final queryGate = Completer<bool>();
       final factory = FakeBackendFactory(
         makeVideoPlayer: (_) => FakePlayerBackend(

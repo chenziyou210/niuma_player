@@ -1,3 +1,6 @@
+import 'package:flutter/foundation.dart';
+import 'package:niuma_player/niuma_player.dart';
+import 'package:niuma_player/src/data/video_player_backend.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -28,6 +31,31 @@ void main() {
     tearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, null);
+    });
+
+    test('Android backend 把 PiP 播放和暂停状态传给原生', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final backend =
+          VideoPlayerBackend(NiumaDataSource.network('https://x/a.mp4'));
+      addTearDown(backend.dispose);
+      await backend.updatePictureInPictureActions(isPlaying: false);
+      await backend.updatePictureInPictureActions(isPlaying: true);
+      expect(calls.map((c) => c.method), [
+        'updatePictureInPictureActions',
+        'updatePictureInPictureActions',
+      ]);
+      expect(calls.map((c) => c.arguments['isPlaying']), [false, true]);
+    });
+
+    test('iOS backend 不发送 Android PiP action 更新', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final backend =
+          VideoPlayerBackend(NiumaDataSource.network('https://x/a.mp4'));
+      addTearDown(backend.dispose);
+      await backend.updatePictureInPictureActions(isPlaying: false);
+      expect(calls, isEmpty);
     });
 
     test('enterPictureInPicture 调 channel 带 textureId / aspectNum / aspectDen',

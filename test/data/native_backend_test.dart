@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:niuma_player/niuma_player.dart';
@@ -6,9 +8,50 @@ import 'package:niuma_player/src/data/native_backend.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('dispose 先于 create 返回：释放迟到 session，不订阅事件', () async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const global = MethodChannel('cn.niuma/player');
+    const events = EventChannel('cn.niuma/player/events/7');
+    final create = Completer<Map<String, dynamic>>();
+    final createStarted = Completer<void>();
+    final disposedIds = <int>[];
+    var listenCalls = 0;
+    messenger.setMockMethodCallHandler(global, (call) async {
+      if (call.method == 'create') {
+        createStarted.complete();
+        return create.future;
+      }
+      if (call.method == 'dispose') {
+        disposedIds.add(call.arguments['textureId'] as int);
+      }
+      return null;
+    });
+    messenger.setMockStreamHandler(
+        events,
+        MockStreamHandler.inline(
+          onListen: (_, sink) => listenCalls++,
+        ));
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(global, null);
+      messenger.setMockStreamHandler(events, null);
+    });
+    final backend = NativeBackend(NiumaDataSource.network('https://x/a.mp4'));
+    final initOutcome = expectLater(backend.initialize(), throwsStateError);
+    await createStarted.future;
+    await backend.dispose();
+    create.complete(
+        {'textureId': 7, 'selectedVariant': 'ijk', 'isPlatformView': false});
+    await initOutcome;
+    await Future<void>.delayed(Duration.zero);
+    await backend.dispose();
+    expect(disposedIds, [7]);
+    expect(listenCalls, 0);
+    expect(backend.textureId, isNull);
+  });
+
   group('NativeBackend 初始化失败的结构化分类', () {
-    test('prepare 前的 native error：initialize 以携带 Kotlin 结构化分类的错误失败',
-        () async {
+    test('prepare 前的 native error：initialize 以携带 Kotlin 结构化分类的错误失败', () async {
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       const global = MethodChannel('cn.niuma/player');
@@ -47,8 +90,7 @@ void main() {
         messenger.setMockStreamHandler(events, null);
       });
 
-      final backend =
-          NativeBackend(NiumaDataSource.network('https://x/a.mp4'));
+      final backend = NativeBackend(NiumaDataSource.network('https://x/a.mp4'));
       await expectLater(
         backend.initialize(),
         throwsA(isA<PlayerError>()

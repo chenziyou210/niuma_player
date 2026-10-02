@@ -1,6 +1,7 @@
 package cn.niuma.niuma_player
 
 import android.content.Context
+import android.content.res.AssetManager
 import android.net.Uri
 import android.view.Surface
 import io.flutter.plugin.common.BinaryMessenger
@@ -22,9 +23,16 @@ internal class IjkSession(
 ) : PlayerSession(textureRegistry, messenger, context, dataSource, platformViewInstanceId) {
 
     private val player: IjkMediaPlayer = IjkMediaPlayer()
+    private var assetDataSource: AssetMediaDataSource? = null
 
     init {
-        bringUp()
+        try {
+            bringUp()
+        } catch (error: Throwable) {
+            // 缺失 asset 等同步失败也要清理已分配的播放器、纹理与 channel。
+            try { release() } catch (_: Throwable) {}
+            throw error
+        }
     }
 
     // ── Configure ────────────────────────────────────────────────────────
@@ -75,7 +83,7 @@ internal class IjkSession(
         player.setOption(
             IjkMediaPlayer.OPT_CATEGORY_FORMAT,
             "protocol_whitelist",
-            "async,cache,crypto,file,http,https,ijkhttphook,ijkinject,ijklivehook,ijklongurl,ijksegment,ijktcphook,pipe,rtp,tcp,tls,udp,ijkurlhook,data"
+            "async,cache,crypto,file,http,https,ijkhttphook,ijkinject,ijklivehook,ijklongurl,ijkmediadatasource,ijksegment,ijktcphook,pipe,rtp,tcp,tls,udp,ijkurlhook,data"
         )
     }
 
@@ -162,9 +170,13 @@ internal class IjkSession(
                 player.setDataSource(uri)
             }
             "asset" -> {
-                // Caller is expected to pre-resolve to an absolute file path;
-                // raw asset URIs are accepted as a best-effort.
-                player.setDataSource(context, Uri.parse(uri))
+                // AssetManager 同时支持压缩 / 未压缩资源，并隐藏 APK 偏移。
+                // IJK 的 FileDescriptor 重载不保留 asset 的 offset/length，不能直传。
+                val asset = AssetMediaDataSource(
+                    context.assets.open(uri, AssetManager.ACCESS_RANDOM)
+                )
+                assetDataSource = asset
+                player.setDataSource(asset)
             }
             else -> {
                 throw IllegalArgumentException("Unknown dataSource.type: $type")
@@ -186,8 +198,13 @@ internal class IjkSession(
         player.setVolume(volume, volume)
     }
     override fun underlyingRelease() {
-        try { player.stop() } catch (_: Throwable) {}
-        player.release()
+        try {
+            try { player.stop() } catch (_: Throwable) {}
+            player.release()
+        } finally {
+            assetDataSource?.close()
+            assetDataSource = null
+        }
     }
     override fun underlyingCurrentPosition(): Long = player.currentPosition
 

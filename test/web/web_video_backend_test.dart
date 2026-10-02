@@ -93,8 +93,152 @@ NiumaDataSource hls(String name, {Map<String, String>? headers}) =>
     NiumaDataSource.network('https://example.invalid/$name.m3u8',
         headers: headers);
 
+class _WebBackendFactory implements BackendFactory {
+  final backends = <WebVideoBackend>[];
+  @override
+  PlayerBackend createVideoPlayer(NiumaDataSource source,
+      {bool useAndroidPlatformView = false}) {
+    final backend = WebVideoBackend(source);
+    backends.add(backend);
+    return backend;
+  }
+
+  @override
+  PlayerBackend createNative(NiumaDataSource source,
+          {bool useAndroidPlatformView = false}) =>
+      throw UnimplementedError();
+}
+
+class _WebPlatformBridge implements PlatformBridge {
+  @override
+  bool get isIOS => false;
+  @override
+  bool get isWeb => true;
+  @override
+  Future<int> processHeapLimitMb() async => 256;
+  @override
+  Future<void> setKeepScreenOn(bool on) async {}
+}
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   setUp(installFakeHls);
+
+  test('切线初始化中 load 新媒体：新 load 成功且旧候选被释放', () async {
+    final factory = _WebBackendFactory();
+    final ctrl = NiumaPlayerController(
+      NiumaMediaSource.lines(lines: [
+        MediaLine(id: 'a', label: 'A', source: hls('a')),
+        MediaLine(id: 'b', label: 'B', source: hls('b')),
+      ], defaultLineId: 'a'),
+      backendFactory: factory,
+      platform: _WebPlatformBridge(),
+      retryPolicy: const RetryPolicy.none(),
+    );
+    addTearDown(ctrl.dispose);
+    final init = ctrl.initialize();
+    await settle();
+    fakeMetadata(factory.backends.last.htmlVideoElement, duration: 10);
+    await init;
+    final switching = ctrl.switchLine('b');
+    final switchOutcome =
+        switching.then<Object?>((_) => null, onError: (Object e) => e);
+    await settle();
+    final oldHls = hlsAt(hlsCount - 1);
+    final loading = ctrl.load(NiumaMediaSource.single(hls('new')));
+    final loadOutcome =
+        loading.then<Object?>((_) => null, onError: (Object e) => e);
+    await settle();
+    fakeMetadata(factory.backends.last.htmlVideoElement, duration: 20);
+    expect(await switchOutcome, isA<StateError>());
+    expect(await loadOutcome.timeout(const Duration(seconds: 2)), isNull);
+    expect(ctrl.backend, same(factory.backends.last));
+    expect(ctrl.value.duration, const Duration(seconds: 20));
+    expect(hlsDestroyed(oldHls), isTrue);
+  });
+
+  test('原生控件开启后可命中，关闭后恢复 Flutter 手势穿透', () async {
+    final backend = WebVideoBackend(hls('controls'));
+    final video = backend.htmlVideoElement;
+    final wrapper = video.parentElement as web.HTMLElement;
+    wrapper.style
+      ..setProperty('position', 'fixed')
+      ..setProperty('left', '0')
+      ..setProperty('top', '0')
+      ..setProperty('width', '320px')
+      ..setProperty('height', '180px')
+      ..setProperty('z-index', '2147483647');
+    web.document.body!.appendChild(wrapper);
+    addTearDown(() async {
+      wrapper.remove();
+      await backend.dispose();
+    });
+    await backend.setWebNativeControls(true);
+    expect(web.document.elementFromPoint(100, 160), same(video));
+    await backend.setWebNativeControls(false);
+    expect(web.document.elementFromPoint(100, 160), isNot(same(video)));
+  });
+
+  test('原生控件主动暂停，不被 DOM 搬迁自愈逻辑立即续播', () async {
+    final backend = WebVideoBackend(hls('native-pause'));
+    addTearDown(backend.dispose);
+    var playCalls = 0;
+    (backend.htmlVideoElement as JSObject).setProperty(
+        'play'.toJS,
+        (() {
+          playCalls++;
+          return Future<JSAny?>.value(null).toJS;
+        }).toJS);
+    await backend.setWebNativeControls(true);
+    await backend.play();
+    backend.htmlVideoElement.dispatchEvent(web.Event('pause'));
+    await settle();
+    expect(playCalls, 1);
+    expect(backend.value.phase, PlayerPhase.paused);
+  });
+
+  test('原生恢复播放后关闭 controls：DOM 搬迁仍按播放意图续播', () async {
+    final backend = WebVideoBackend(hls('native-resume'));
+    addTearDown(backend.dispose);
+    final video = backend.htmlVideoElement;
+    var playCalls = 0;
+    (video as JSObject).setProperty(
+        'play'.toJS,
+        (() {
+          playCalls++;
+          return Future<JSAny?>.value(null).toJS;
+        }).toJS);
+    await backend.setWebNativeControls(true);
+    await backend.play();
+    video.dispatchEvent(web.Event('pause'));
+    // 原生控件的 play 不经过 backend.play()，模拟 DOM 真值及事件。
+    (globalContext.getProperty('Object'.toJS) as JSObject).callMethod(
+      'defineProperty'.toJS,
+      video as JSObject,
+      'paused'.toJS,
+      _getterDescriptor(false.toJS),
+    );
+    video.dispatchEvent(web.Event('play'));
+    await backend.setWebNativeControls(false);
+    video.dispatchEvent(web.Event('pause'));
+    await settle();
+    expect(playCalls, 2);
+    expect(backend.value.phase, PlayerPhase.playing);
+
+    // 刚主动 pause 后迟到的 play 事件不能重新建立播放意图。
+    (globalContext.getProperty('Object'.toJS) as JSObject).callMethod(
+      'defineProperty'.toJS,
+      video as JSObject,
+      'paused'.toJS,
+      _getterDescriptor(true.toJS),
+    );
+    await backend.pause();
+    video.dispatchEvent(web.Event('play'));
+    video.dispatchEvent(web.Event('pause'));
+    await settle();
+    expect(playCalls, 2);
+    expect(backend.value.phase, PlayerPhase.paused);
+  });
 
   group('直播（duration = Infinity）', () {
     test('loadedmetadata 带 Infinity duration 即视为初始化完成，value.duration 为 0',
@@ -229,8 +373,7 @@ void main() {
   });
 
   group('过期 DOM 事件', () {
-    test('元素无 error 状态时的裸 error 事件（旧源过期事件）不得把当前源打成 error',
-        () async {
+    test('元素无 error 状态时的裸 error 事件（旧源过期事件）不得把当前源打成 error', () async {
       final backend = WebVideoBackend(hls('stale-error'));
       final init = backend.initialize();
       await settle();
@@ -258,7 +401,8 @@ void main() {
       final load = backend.load(hls('gen-b'));
       await settle();
       // 新源元数据未到（duration 回到 NaN）；旧源的 loadedmetadata 此刻穿过来。
-      fakeMetadata(backend.htmlVideoElement, duration: double.nan, readyState: 0);
+      fakeMetadata(backend.htmlVideoElement,
+          duration: double.nan, readyState: 0);
       await settle();
 
       var loadDone = false;

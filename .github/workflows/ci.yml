@@ -88,6 +88,10 @@ jobs:
         working-directory: example
         run: flutter build apk --debug
 
+      - name: Android asset data source tests
+        working-directory: example/android
+        run: ./gradlew :niuma_player:testDebugUnitTest
+
   build-web:
     name: Build Web (example)
     runs-on: ubuntu-latest

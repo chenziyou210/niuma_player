@@ -34,7 +34,6 @@ class NativeBackend extends PlayerBackend {
   /// native 侧实例化的变体。2.0 起恒 `"ijk"`，仅用于超时错误信息。
   String? _selectedVariant;
 
-
   static const MethodChannel _systemChannel =
       MethodChannel('niuma_player/system');
 
@@ -81,6 +80,7 @@ class NativeBackend extends PlayerBackend {
 
   @override
   Future<void> initialize() async {
+    if (_disposed) throw StateError('NativeBackend has been disposed');
     final result = await _globalChannel.invokeMapMethod<String, dynamic>(
       'create',
       <String, dynamic>{
@@ -103,6 +103,12 @@ class NativeBackend extends PlayerBackend {
         message: 'create did not return an int textureId: $result',
       );
     }
+    // dispose 可能早于 create 返回：当时还没有 id 可释放。迟到的 session
+    // 必须在这里释放，不能再挂事件订阅（第二次 dispose 会直接返回）。
+    if (_disposed) {
+      await _disposeNativeInstance(tid);
+      throw StateError('NativeBackend disposed before create completed');
+    }
     _textureId = tid;
     _selectedVariant = result['selectedVariant'] as String?;
     _isPlatformView = result['isPlatformView'] == true;
@@ -122,6 +128,7 @@ class NativeBackend extends PlayerBackend {
       _prepareWatchdog?.cancel();
       _prepareWatchdog = null;
     }
+    if (_disposed) throw StateError('NativeBackend disposed before prepared');
     _startPipEventListening();
   }
 
@@ -459,18 +466,20 @@ class NativeBackend extends PlayerBackend {
     _pipEventReg?.cancel();
     _pipEventReg = null;
     final tid = _textureId;
-    if (tid != null) {
-      try {
-        await _globalChannel.invokeMethod<void>(
-          'dispose',
-          <String, dynamic>{'textureId': tid},
-        );
-      } catch (_) {
-        // 吞掉 native dispose 错误，保证 Dart 资源始终被释放。
-      }
-    }
+    if (tid != null) await _disposeNativeInstance(tid);
     await _valueController.close();
     await _eventController.close();
+  }
+
+  Future<void> _disposeNativeInstance(int id) async {
+    try {
+      await _globalChannel.invokeMethod<void>(
+        'dispose',
+        <String, dynamic>{'textureId': id},
+      );
+    } catch (_) {
+      // best-effort：平台清理失败不得阻止 Dart 资源释放或改变生命周期错误。
+    }
   }
 
   /// 查询 Android 进程堆上限（MB）；原生不可用返 null，调用方兜默认值。

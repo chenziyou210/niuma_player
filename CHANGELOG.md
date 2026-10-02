@@ -81,6 +81,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Web 原生全屏控件**：进入 Safari/标准元素全屏时自动开启可交互控件，
+  退出、ESC 与进入失败时恢复调用方的控件设置；按实例处理全屏归属，
+  取消/销毁后丢弃迟到请求，全屏内主动暂停后退出不强制续播。
+
+- 修复 IJK 创建返回前销毁导致的原生会话与事件订阅泄漏。
+- 切线初始化中 `load()` 不再复用半初始化 backend；快速切回原线路会取消在途切线。
+- Web 原生控件开启时恢复点击命中，并尊重控件暂停；关闭后恢复 Flutter 手势穿透。
+- Android IJK 正确解析 Flutter asset key，通过支持随机读取的资源流播放打包视频。
+- Android 默认 video_player 后端同步 PiP 播放/暂停按钮状态。
+
 - **`bufferedPosition` 取「包含当前位置的那段」缓冲区间的末尾，不再取最后
   一段**：浏览器 / AVPlayer 会保留 seek 前后的多段区间，拖到后面再拖回开头后，
   web 与 video_player 后端此前都取末段末尾，播到 16 秒进度条的缓冲段却铺到

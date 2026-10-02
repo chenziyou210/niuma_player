@@ -55,6 +55,7 @@ android {
     }
 
     dependencies {
+        testImplementation("junit:junit:4.13.2")
         // IJK 软解兜底：自编 FFmpeg 8.1 产物，vendored 在 ../localmaven/
         // （ShikinChen/ijkplayer-android JNI + 上游 FFmpeg n8.1 + 本仓 3 个
         // 补丁，OpenSSL 3.2 静态，c++_static 不带 libc++_shared，

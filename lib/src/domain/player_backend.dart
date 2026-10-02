@@ -35,6 +35,8 @@ abstract class PlayerBackend {
   /// Web-only：让底层 `<video>` 进浏览器原生全屏。默认返 false。
   /// iOS Safari 只能走 `webkitEnterFullscreen`（进系统 player，Flutter
   /// 控件不跟随）；其余浏览器走标准 `requestFullscreen()`。
+  /// 全屏期间临时开启原生控件，退出后恢复 [setWebNativeControls] 的设置。
+  /// WebKit 退出动画尚未结束时再次进入返回 false，需等待下一次用户操作。
   Future<bool> enterNativeFullscreen() async => false;
 
   /// Web-only：退出浏览器原生 fullscreen。默认实现返 false。
@@ -78,6 +80,7 @@ abstract class PlayerBackend {
 
   /// Web-only：开 / 关 `<video>` 浏览器原生控件。非 web 为空操作。
   /// iOS Safari 会吞视频像素区的点击导致自定义控件失效，可开原生控件兜底。
+  /// 原生全屏期间始终显示控件，此设置在退出全屏后生效。
   Future<void> setWebNativeControls(bool show) async {}
 
   /// 读当前亮度（窗口级 0..1，未支持返 0）。

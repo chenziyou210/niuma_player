@@ -236,6 +236,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     if (_disposed) {
       throw StateError('NiumaPlayerController has been disposed');
     }
+    // 必须在换代前快照：switchLine 的候选初始化不由 _initCompleter 跟踪。
+    // 复用它会让旧 initialize 的失败清理误杀新 load 所用的同一 backend。
+    final candidateInFlight = _candidateBringUpInFlight;
     final epoch = ++_epoch; // 压倒一切在途的 initialize / load / switchLine
     _source = newSource;
     _activeLineId = newSource.defaultLineId;
@@ -243,9 +246,11 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     final backend = _backend;
     // 初始化还在途的 backend 不能原地换源（半初始化状态下 load 的结果
     // 不可预期），这种情况走重建。
-    final initInFlight =
-        _initCompleter != null && !_initCompleter!.isCompleted;
-    if (backend != null && backend.supportsSourceSwap && !initInFlight) {
+    final initInFlight = _initCompleter != null && !_initCompleter!.isCompleted;
+    if (backend != null &&
+        backend.supportsSourceSwap &&
+        !initInFlight &&
+        !candidateInFlight) {
       // middleware 计入 initTimeout 预算：卡死的 middleware 不能让 load 的
       // future 永远悬着。
       final resolved =
@@ -333,7 +338,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
         ));
         await _disposeCurrentBackend();
         // IJK 兜底播的是默认线路。
-        await _initNativeAfterVpFailure(source.currentLine.source, epoch, vpError);
+        await _initNativeAfterVpFailure(
+            source.currentLine.source, epoch, vpError);
         _activeLineId = source.defaultLineId;
       }
     } finally {
@@ -378,8 +384,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
     _ensureCurrent(epoch);
     // middleware 计入 initTimeout 预算：卡死的 middleware 会让本链的
     // finally 永不执行（候选登记悬着、调用方 future 悬着），必须有界。
-    final resolved =
-        await runSourceMiddlewares(raw, middlewares).timeout(options.initTimeout);
+    final resolved = await runSourceMiddlewares(raw, middlewares)
+        .timeout(options.initTimeout);
     _ensureCurrent(epoch);
     final backend = create(resolved);
     await _attachBackend(backend, epoch);
@@ -476,8 +482,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
   /// 失败 backend 反复 initialize 是打不活的）。[switchLine] / 回滚用。
   Future<void> _bringUpVideoPlayer(NiumaDataSource raw, int epoch) async {
     final platformView = await _vpUsePlatformView();
-    await _withRetry(() =>
-        _bringUp(epoch, raw, (r) => _createVideoPlayer(r, platformView)));
+    await _withRetry(
+        () => _bringUp(epoch, raw, (r) => _createVideoPlayer(r, platformView)));
   }
 
   /// IJK 软解兜底初始化。[raw] 为目标线路的原始数据源——middleware 在每次
@@ -676,6 +682,8 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   /// Web-only：让底层 `<video>` 进浏览器原生 fullscreen（iOS Safari 走
   /// `webkitEnterFullscreen` 进系统 player，Flutter 控件不跟随）。io 平台返 false。
+  /// 全屏期间自动开启原生控件，退出后恢复 [setWebNativeControls] 的设置。
+  /// WebKit 退出动画未结束时再次进入返 false，需等待下一次用户操作。
   Future<bool> enterNativeFullscreen() async {
     return await _backend?.enterNativeFullscreen() ?? false;
   }
@@ -695,6 +703,7 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
 
   /// Web-only：开 / 关底层 `<video>` 的浏览器原生控件（iOS Safari 上自定义
   /// 控件点不动时的兜底）。非 web 平台为空操作。
+  /// 原生全屏期间始终显示控件，此设置在退出全屏后生效。
   Future<void> setWebNativeControls(bool show) async =>
       _backend?.setWebNativeControls(show);
 
@@ -712,7 +721,9 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       throw ArgumentError.value(lineId, 'lineId', 'unknown line id');
     }
     final fromId = _activeLineId ?? source.defaultLineId;
-    if (fromId == lineId) return;
+    // activeLineId 在候选就绪前仍指向旧线路；此时再选旧线路是取消切换，
+    // 必须换代并恢复它，不能按稳定状态下的同线路 no-op 处理。
+    if (fromId == lineId && !_candidateBringUpInFlight) return;
 
     // 压倒在途的 initialize / load / 上一次 switchLine：并发切线"最后
     // 一次说了算"，被压倒的那次以 StateError 结束，不回滚、不上报失败。
@@ -817,7 +828,6 @@ class NiumaPlayerController extends ValueNotifier<NiumaPlayerValue> {
       _ensureCurrent(epoch);
     }
   }
-
 
   // ────────────── PiP（画中画） ──────────────
 
